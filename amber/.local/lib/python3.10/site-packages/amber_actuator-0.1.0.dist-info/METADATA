@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: amber_actuator
+Version: 0.1.0
+Summary: Python Interface for Amber Actuator
+Author-Email: Amberobotics <songtianren@amberobotics.com>
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
+# amber_actuator
+[![pdm-managed](https://img.shields.io/badge/pdm-managed-blueviolet)](https://pdm.fming.dev)

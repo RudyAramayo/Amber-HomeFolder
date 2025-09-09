@@ -1,0 +1,10 @@
+package lcmTypes;
+
+struct positionTask_t
+{
+    int64_t timestamp;
+    int32_t actuator_count;
+    int64_t point_count;
+    double points [point_count][actuator_count];
+    double time_s [point_count];
+}

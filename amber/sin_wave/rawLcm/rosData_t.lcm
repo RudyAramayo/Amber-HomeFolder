@@ -1,0 +1,9 @@
+package lcmTypes;
+
+struct rosData_t
+{
+    double jointPosition [7];
+    double jointVelocity [7];
+    double jointCurrent  [7];
+    double jointStatus   [7];
+}

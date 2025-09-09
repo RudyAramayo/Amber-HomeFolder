@@ -1,0 +1,7 @@
+package lcmTypes;
+
+struct gripperCtrl_t
+{
+    int8_t Action;
+    int32_t Intensity;
+}

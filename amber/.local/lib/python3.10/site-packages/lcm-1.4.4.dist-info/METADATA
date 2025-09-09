@@ -1,0 +1,60 @@
+Metadata-Version: 2.1
+Name: lcm
+Version: 1.4.4
+Summary: Lightweight Communications and Marshalling
+Home-page: https://bitbucket.org/frostlab/lcm
+License: GNU LESSER GENERAL PUBLIC LICENSE
+Platform: UNKNOWN
+Classifier: Development Status :: 4 - Beta
+Classifier: Topic :: Communications
+Classifier: Framework :: Robot Framework
+Description-Content-Type: text/markdown
+
+This is the FRoSt Lab at BYU's fork of LCM. It contains only minor modifications to make it compatible with python3, as well as publish it as a pypi package (to make installable from pip).
+
+Original source is [here](https://github.com/lcm-proj/lcm), our fork is available [here](https://bitbucket.org/frostlab/lcm), and to find out more about our lab see [here](https://frostlab.byu.edu/).
+
+[![Build Status](https://robots.et.byu.edu:4000/api/badges/frostlab/lcm/status.svg)](https://robots.et.byu.edu:4000/frostlab/lcm)
+
+# LCM
+
+Lightweight Communications and Marshalling (LCM)
+
+LCM is a set of libraries and tools for message passing and data marshalling,
+targeted at real-time systems where high-bandwidth and low latency are
+critical. It provides a publish/subscribe message passing model and automatic
+marshalling/unmarshalling code generation with bindings for applications in a
+variety of programming languages.
+
+# Quick Links
+
+* [LCM downloads](https://github.com/lcm-proj/lcm/releases)
+* [Website and documentation](https://lcm-proj.github.io)
+
+# Features
+
+* Low-latency inter-process communication
+* Efficient broadcast mechanism using UDP Multicast
+* Type-safe message marshalling
+* User-friendly logging and playback
+* No centralized "database" or "hub" -- peers communicate directly
+* No daemons
+* Few dependencies
+
+## Supported platforms and languages
+
+* Platforms:
+  * GNU/Linux
+  * OS X
+  * Windows
+  * Any POSIX-1.2001 system (e.g., Cygwin, Solaris, BSD, etc.)
+* Languages
+  * C
+  * C++
+  * C#
+  * Go
+  * Java
+  * Lua
+  * MATLAB
+  * Python
+

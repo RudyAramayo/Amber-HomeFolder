@@ -1,0 +1,44 @@
+{
+  "Robot":{
+    "Robot_Interface": "CAN",
+    "Hub_CAN_Name": "can0",
+    "Robot_DOF" : 7,
+    "Control_Frequency": 200,
+    "Max_Velocity":     [5400.0,5400.0,5400.0,5400.0,4200.0,4200.0,4200.0],
+    "Max_Acceleration": [90000,90000,90000,90000,90000,90000,90000],
+    "Max_Jerk":         [50000  ,50000  ,50000  ,50000  ,50000  ,50000  ,50000  ],
+    "Rotation_Direction": [1,1,1,1,1,1,1],
+    "Gear_Ratio": [50,50,50,50,50,50,50]
+  },
+  "End_Effector": {
+    "Gripper_Number": 8
+  },
+  "LCM_Interface": {
+    "Prefix": "Amber_",
+    "PositionCommand": "PosCmd",
+    "ArmStatus": "ArmStatus",
+    "PositionPlan": "PosPlan",
+    "PositionTask": "PosTask",
+    "InverseKinematicsTask": "IKTask",
+    "IK_SolverRespond": "SolverRespond",
+    "ForwardKinematicsTask": "FKTask",
+    "SetArmMode": "SetMode",
+    "GripperControl": "GripperCtrl"
+  },
+  "Solver": {
+    "Enable": true,
+    "Type": "Drake",
+    "ITER": 1000,
+    "EPS": 0.001,
+    "URDF_Path": "./urdf/amber_l1/amber_l1.urdf",
+    "Base_Name": "base_link",
+    "EEF_Name": "seven_Link",
+    "Rotation_Direction": [1,-1,1,-1,1,-1,1],
+    "IgnoreRuckig": 0.3
+  },
+  "Interface": {
+    "UDP_Enable": true,
+    "UDP_Port": 26001,
+    "ROS2_Enable": true
+  }
+}

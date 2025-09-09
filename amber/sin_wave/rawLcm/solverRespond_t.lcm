@@ -1,0 +1,6 @@
+package lcmTypes;
+
+struct solverRespond_t
+{
+    int32_t respond;
+}

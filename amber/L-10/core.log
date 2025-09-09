@@ -1,0 +1,16 @@
+    ___    __  _______  __________ 
+   /   |  /  |/  / __ )/ ____/ __ \
+  / /| | / /|_/ / __  / __/ / /_/ /
+ / ___ |/ /  / / /_/ / /___/ _, _/ 
+/_/  |_/_/  /_/_____/_____/_/ |_|  
+=============  V0.2.0  ============
+[ Loading ] Using Launch File launch.json 
+Base Link = base_link
+End Effector = Lseven_Link
+UDP_SERVER_ENABLE
+[ Loading ] Control Frequency @ 200hz 
+[ Loading ] Using URDF File   @ ./urdf/dual_b1/DualArmL.urdf 
+[ Started ] UDP_Server
+[ DELAY ] 5003[ Started ] LCM_ROS_Data_Publisher
+[ DELAY ] 5004[ Started ] LCM_ROS_Command_Listener
+[ DELAY ] 8629[ DELAY ] 9760[ Started ] Drake_Kinematic_Solver

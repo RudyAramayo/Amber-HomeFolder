@@ -1,0 +1,10 @@
+package lcmTypes;
+
+struct positionPlan_t
+{
+    int32_t freq;
+    int64_t timestamp;
+    int32_t actuator_count;
+    int64_t point_count;
+    double points[point_count][actuator_count];
+}

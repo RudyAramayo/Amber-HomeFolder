@@ -1,0 +1,7 @@
+package lcmTypes;
+
+struct cartesian_t
+{
+    double xyzrpy [6];
+    double time_s;
+}

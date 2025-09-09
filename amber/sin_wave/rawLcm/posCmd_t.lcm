@@ -1,0 +1,6 @@
+package lcmTypes;
+
+struct posCmd_t
+{
+    double jointTarget [7];
+}

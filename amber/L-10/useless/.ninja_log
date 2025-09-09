@@ -1,0 +1,22 @@
+# ninja log v5
+8	13311	1716826627063579082	CMakeFiles/amber_core_dev_O.dir/main.cpp.o	1f5c61e24145c64d
+10	1567	1716826615327613442	CMakeFiles/amber_core_dev_O.dir/RuckigController.cpp.o	36ba2667d36740cb
+8	252	1716826614007617342	CMakeFiles/amber_core_dev_O.dir/launchConfig.cpp.o	c5bcde56b59f5946
+9	891	1716826614651615438	CMakeFiles/amber_core_dev_O.dir/DirectControl/lcmCanSender.cpp.o	af21942fb0628e13
+887	1265	1716822639592851617	CMakeFiles/amber_core_dev_O.dir/DirectControl/realTimer.cpp.o	1785373abccb6222
+2	24	1716827462067657328	build.ninja	63427616065775ba
+1	412	1701425392249196808	CMakeFiles/test.dir/test/RosInterfaceListener.cpp.o	26c34be3d158e178
+9	3496	1716826617255607759	CMakeFiles/amber_core_dev_O.dir/JointInterpolatePlanner.cpp.o	a2ae546b7271aa65
+252	1231	1716826614991614433	CMakeFiles/amber_core_dev_O.dir/RosInterface.cpp.o	a557ec720e4e19a0
+9	788	1716826614547615745	CMakeFiles/amber_core_dev_O.dir/DirectControl/canRecv.cpp.o	3afb2977abac231e
+13675	14234	1716826627987576400	amber_core_dev_O	281415a665cdb599
+412	716	1701425392549195168	test	1ce0b5eee002910f
+9	11538	1716826625295584222	CMakeFiles/amber_core_dev_O.dir/drake_kinematics/SolverDriver.cpp.o	b74e8ab344b22675
+297	317	1716822638644875508	CMakeFiles/amber_core_dev_O.dir/DirectControl/directControl.cpp.o	d456231ef31d5baa
+9	922	1716826614683615344	CMakeFiles/amber_core_dev_O.dir/UdpServer.cpp.o	d80d29bb7f53a88
+9	1081	1716822639408856244	CMakeFiles/amber_core_dev_O.dir/JointPositionController.cpp.o	7973425a7a0cf34e
+9	788	1716826614547615745	CMakeFiles/amber_core_dev_O.dir/DirectControl/positionCanSender.cpp.o	f3bd38372781d8e6
+9	13675	1716826627427578025	CMakeFiles/amber_core_dev_O.dir/drake_kinematics/op_kin.cpp.o	6f421c6a26161493
+2	23	1716827462067657328	build.ninja	63427616065775ba
+8	514	1716827462583660049	CMakeFiles/amber_core_dev_O.dir/DirectControl/lcmCanSender.cpp.o	af21942fb0628e13
+514	1084	1716827463151663045	amber_core_dev_O	281415a665cdb599

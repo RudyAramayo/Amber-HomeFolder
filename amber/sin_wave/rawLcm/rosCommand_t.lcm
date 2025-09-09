@@ -1,0 +1,6 @@
+package lcmTypes;
+
+struct rosCommand_t
+{
+    double jointTarget [7];
+}
