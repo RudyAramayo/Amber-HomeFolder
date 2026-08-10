@@ -1,7 +1,7 @@
 import socket
 import time
 from ctypes import *
-import amber_api.cmd_110
+import argparse
 
 '''
 A simple example for controlling a single joint move once by python
@@ -10,6 +10,14 @@ Ref: https://github.com/MrAsana/AMBER_B1_ROS2/wiki/SDK-&-API---UDP-Ethernet-Prot
 C++ version:  https://github.com/MrAsana/C_Plus_API/tree/master/amber_gui_4_node
      
 '''
+parser = argparse.ArgumentParser(description="Example of argparse with default values.")
+parser.add_argument("--ip", type=str, default="10.0.0.5", help="IP (default: %(default)s)")
+parser.add_argument("--port", type=int, default=26002, help="Port (default: %(default)s)")
+
+args = parser.parse_args()
+
+#print(f"ip {args.ip}")
+#print(f"port {args.port}")
 
 
 class robot_joint_position(Structure):  # ctypes struct for send
@@ -21,7 +29,14 @@ class robot_joint_position(Structure):  # ctypes struct for send
 
                 ]
 
-
+class robot_joint_position_getMode(Structure):                              # ctypes struct for send
+    _pack_ = 1                                                      # Override Structure align
+    _fields_ = [("cmd_no", c_uint16),                               # Ref:https://docs.python.org/3/library/ctypes.html
+                ("length", c_uint16),
+                ("counter", c_uint32),
+                ("joint_id", c_uint32),
+                ]
+                
 class robot_mode_data(Structure):
     _pack_ = 1
     _fields_ = [("cmd_no", c_uint16),
@@ -30,12 +45,27 @@ class robot_mode_data(Structure):
                 ("respond", c_uint8),
                 ]
 
+#this funtion has a different robot_joint_position... does that matter?!?!
+def get_work_mode(IP_ADDR=args.ip, port=args.port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    #s.bind(("0.0.0.0", 12430))
+    payloadS = robot_joint_position_getMode(110, 12, 0, 8)
+    s.sendto(payloadS, (IP_ADDR, port))
+    s.settimeout(1)
 
-def check_activated(IP_ADDR="127.0.0.1", port=26001, timeout=2):
+    try:
+        data, addr = s.recvfrom(1024)                                       # Need receive return
+        #print("Receiving: ", data.hex())
+        payloadR = robot_mode_data.from_buffer_copy(data)
+        return payloadR.respond
+    except socket.timeout:
+        return -1
+
+def check_activated(IP_ADDR=args.ip, port=args.port, timeout=2):
     time_passed = 0
     while time_passed < timeout:
         activated = 0
-        mode_now = amber_api.cmd_110.get_work_mode(IP_ADDR=IP_ADDR, port=port)
+        mode_now = get_work_mode(IP_ADDR=IP_ADDR, port=port)
         for i in range(7):
             if (mode_now[i] == 1):
                 activated += mode_now[i]
@@ -47,7 +77,7 @@ def check_activated(IP_ADDR="127.0.0.1", port=26001, timeout=2):
     return False
 
 
-def on_active_mode(IP_ADDR="127.0.0.1", port=26001):
+def on_active_mode(IP_ADDR=args.ip, port=args.port):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(3)
     #s.bind(("0.0.0.0", 12430))
@@ -62,7 +92,7 @@ def on_active_mode(IP_ADDR="127.0.0.1", port=26001):
         return -1
 
 
-def on_position_mode(IP_ADDR="127.0.0.1", port=26001):
+def on_position_mode(IP_ADDR=args.ip, port=args.port):
     on_active_mode(IP_ADDR=IP_ADDR, port=port)
     if check_activated(IP_ADDR=IP_ADDR, port=port):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -83,7 +113,7 @@ def on_position_mode(IP_ADDR="127.0.0.1", port=26001):
         return -1
 
 
-def on_current_mode(IP_ADDR="127.0.0.1", port=26001):
+def on_current_mode(IP_ADDR=args.ip, port=args.port):
     on_active_mode(IP_ADDR=IP_ADDR, port=port)
     if check_activated(IP_ADDR=IP_ADDR, port=port):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -102,7 +132,7 @@ def on_current_mode(IP_ADDR="127.0.0.1", port=26001):
         return -1
 
 
-def on_deactivate_mode(IP_ADDR="127.0.0.1", port=26001):
+def on_deactivate_mode(IP_ADDR=args.ip, port=args.port):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(3)
     #s.bind(("0.0.0.0", 12330))
