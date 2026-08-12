@@ -1,0 +1,23 @@
+[Unit]
+Description=Orbitus Cerebro Amber arm gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=amber
+Group=amber
+WorkingDirectory=/home/amber/rob_gateway
+Environment=PYTHONUNBUFFERED=1
+Environment=LCM_DEFAULT_URL=udpm://239.255.76.67:7667?ttl=0
+ExecStart=/usr/bin/python3 /home/amber/rob_gateway/rob_amber_gateway.py --listen-host 127.0.0.1
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/home/amber/sin_wave
+
+[Install]
+WantedBy=multi-user.target
