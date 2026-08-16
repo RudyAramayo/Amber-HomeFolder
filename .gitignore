@@ -1,0 +1,32 @@
+# Keep future machine/runtime state out of the deployment repository.
+# Some of these paths are already present in the historical snapshot; ignore
+# rules do not remove files that Git already tracks.
+.DS_Store
+**/.DS_Store
+**/__pycache__/
+**/*.py[cod]
+**/*.log
+**/nohup.out
+**/*.swp
+**/*.swo
+
+amber/.bash_history
+amber/.lesshst
+amber/.python_history
+amber/.viminfo
+amber/.wget-hsts
+amber/.cache/
+amber/.local/
+amber/.ros/
+amber/.ssh/
+amber/dashboard/venv/
+
+amber/**/CAN_Devices.txt
+amber/**/acm_entries.txt
+amber/rob_gateway/staging/
+amber/rob_gateway/*.pre-*
+
+# The gateway authentication token is created only on the Ubuntu host.
+**/rob-amber-gateway/token
+system/secrets/
+

@@ -18,4 +18,7 @@ async def main(host: str, port: int, token: str) -> None:
     await writer.wait_closed()
 
 
-asyncio.run(main(sys.argv[1], int(sys.argv[2]), sys.argv[3]))
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        raise SystemExit("usage: test_gateway.py HOST PORT TOKEN")
+    asyncio.run(main(sys.argv[1], int(sys.argv[2]), sys.argv[3]))

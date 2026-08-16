@@ -1,0 +1,3 @@
+# Installed for the amber user; supplies Python bindings used by the gateway.
+lcm==1.4.4
+

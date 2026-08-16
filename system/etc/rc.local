@@ -1,0 +1,27 @@
+#!/bin/bash
+ip link set lo multicast on
+route add -net 224.0.0.0 netmask 240.0.0.0 dev lo
+route add -net 239.255.76.67 netmask 255.255.255.255 dev enp2s0
+export LCM_DEFAULT_URL=udpm://239.255.76.67:7667?ttl=10
+
+cd /home/amber/init
+bash initCan.sh
+echo "[ AMBER CORE ] CAN UP"
+for i in `seq 15`
+do
+  sleep 1
+  echo "[ AMBER CORE ] Waiting Network [$i/15]"
+done
+time=$(date "+%Y%m%d-%H%M%S")
+
+echo "${time}" >> core.log
+
+cd /home/amber/L-10
+nohup ./amber_core_L >core.log 2>&1 &
+cd /home/amber/R-11
+nohup ./amber_core_R >core.log 2>&1 &
+echo "[ AMBER CORE ] MAIN CONTROL CORE UP"
+beep -f 659.2 -r 3 -d 100 -l 100
+beep -f 523.2 -r 1 -d 100 -l 400
+exit 0
+

@@ -30,7 +30,7 @@
     "Type": "Drake",
     "ITER": 1000,
     "EPS": 0.001,
-    "URDF_Path": "./urdf/dual_b1/DualArm.urdf",
+    "URDF_Path": "./urdf/dual_b1/DualArmR.urdf",
     "Base_Name": "base_link",
     "EEF_Name": "Rseven_Link",
     "Rotation_Direction": [1,-1,1,-1,1,-1,1],

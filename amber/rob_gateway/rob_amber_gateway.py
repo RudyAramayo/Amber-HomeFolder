@@ -3,7 +3,8 @@
 
 Commands arrive over an authenticated, ordered TCP session. The gateway owns
 the local UDP sockets used by the vendor Amber cores and subscribes to LCM arm
-status. It never changes actuator configuration or drive limits.
+status. Mode changes use the vendor's bounded mode-control API; the gateway
+never changes drive limits or writes controller configuration.
 """
 
 from __future__ import annotations
@@ -15,9 +16,8 @@ import ctypes
 import hmac
 import json
 import logging
-import os
+import math
 import secrets
-import signal
 import socket
 import sys
 import threading
@@ -31,6 +31,30 @@ JOINT_COUNT = 7
 MAX_LINE_BYTES = 16_384
 HEARTBEAT_TIMEOUT_S = 2.5
 TELEMETRY_PERIOD_S = 0.05
+MAX_TELEMETRY_AGE_S = 0.25
+FRESH_TELEMETRY_TIMEOUT_S = 1.0
+MODE_TRANSITION_TIMEOUT_S = 2.0
+MODE_POLL_PERIOD_S = 0.05
+HOLD_DURATION_S = 0.65
+MODE_INACTIVE = 0
+MODE_ACTIVE = 1
+MODE_POSITION = 2
+JOINT_LIMITS_RAD = (
+    (-2.4435, 2.4435),
+    (-2.3213, 2.3213),
+    (-2.2863, 2.2863),
+    (-2.2863, 2.2863),
+    (-2.2863, 2.2863),
+    (-2.2863, 2.2863),
+    (-3.05, 3.05),
+)
+MODE_NAMES = {
+    0: "inactive",
+    1: "active",
+    2: "position",
+    3: "speed",
+    4: "current",
+}
 LOGGER = logging.getLogger("rob-amber-gateway")
 
 
@@ -52,6 +76,36 @@ class CommandResponse(ctypes.LittleEndianStructure):
         ("length", ctypes.c_uint16),
         ("counter", ctypes.c_uint32),
         ("respond", ctypes.c_uint8),
+    ]
+
+
+class ModeCommand(ctypes.LittleEndianStructure):
+    _pack_ = 1
+    _fields_ = [
+        ("cmd_no", ctypes.c_uint16),
+        ("length", ctypes.c_uint16),
+        ("counter", ctypes.c_uint32),
+        ("mode", ctypes.c_uint16),
+    ]
+
+
+class ModeQuery(ctypes.LittleEndianStructure):
+    _pack_ = 1
+    _fields_ = [
+        ("cmd_no", ctypes.c_uint16),
+        ("length", ctypes.c_uint16),
+        ("counter", ctypes.c_uint32),
+        ("joint_id", ctypes.c_uint32),
+    ]
+
+
+class ModeQueryResponse(ctypes.LittleEndianStructure):
+    _pack_ = 1
+    _fields_ = [
+        ("cmd_no", ctypes.c_uint16),
+        ("length", ctypes.c_uint16),
+        ("counter", ctypes.c_uint32),
+        ("modes", ctypes.c_uint16 * JOINT_COUNT),
     ]
 
 
@@ -106,6 +160,56 @@ class AmberUDPTransport:
             if response.counter != payload.counter:
                 raise RuntimeError("Amber response counter mismatch")
             return int(response.respond)
+        finally:
+            sock.close()
+
+    async def set_mode(self, arm: ArmConfig, command_id: int, mode: int) -> int:
+        async with self._locks[arm.name]:
+            return await asyncio.to_thread(
+                self._set_mode_blocking, arm, command_id, mode
+            )
+
+    def _set_mode_blocking(self, arm: ArmConfig, command_id: int,
+                           mode: int) -> int:
+        payload = ModeCommand()
+        payload.cmd_no = 10
+        payload.length = ctypes.sizeof(ModeCommand)
+        payload.counter = command_id & 0xFFFFFFFF
+        payload.mode = mode
+        response = self._exchange(arm, payload, CommandResponse)
+        return int(response.respond)
+
+    async def get_modes(self, arm: ArmConfig, command_id: int) -> list[int]:
+        async with self._locks[arm.name]:
+            return await asyncio.to_thread(
+                self._get_modes_blocking, arm, command_id
+            )
+
+    def _get_modes_blocking(self, arm: ArmConfig, command_id: int) -> list[int]:
+        payload = ModeQuery()
+        payload.cmd_no = 110
+        payload.length = ctypes.sizeof(ModeQuery)
+        payload.counter = command_id & 0xFFFFFFFF
+        # The vendor command uses joint selector 8 to request all seven joints.
+        payload.joint_id = 8
+        response = self._exchange(arm, payload, ModeQueryResponse)
+        return [int(value) for value in response.modes]
+
+    def _exchange(self, arm: ArmConfig, payload: ctypes.Structure,
+                  response_type: type[ctypes.Structure]) -> ctypes.Structure:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(self.timeout)
+            sock.sendto(bytes(payload), (self.host, arm.udp_port))
+            data, _ = sock.recvfrom(1024)
+            if len(data) < ctypes.sizeof(response_type):
+                raise RuntimeError("short Amber response")
+            response = response_type.from_buffer_copy(data)
+            if response.cmd_no != payload.cmd_no:
+                raise RuntimeError("Amber response command mismatch")
+            if response.counter != payload.counter:
+                raise RuntimeError("Amber response counter mismatch")
+            return response
         finally:
             sock.close()
 
@@ -175,6 +279,7 @@ class ClientSession:
         self.last_heartbeat = time.monotonic()
         self.last_command_id = 0
         self.telemetry_task: asyncio.Task[None] | None = None
+        self.command_in_progress = False
 
     async def run(self) -> None:
         peer = self.writer.get_extra_info("peername")
@@ -191,11 +296,16 @@ class ClientSession:
             supplied = str(hello.get("token", ""))
             if not hmac.compare_digest(supplied, self.server.token):
                 raise PermissionError("authentication failed")
+            if not self.server.claim_controller(self):
+                raise PermissionError(
+                    "another authenticated controller session is active"
+                )
             self.authenticated = True
             self.last_heartbeat = time.monotonic()
             await self.send({"type": "ready", "protocol": PROTOCOL,
                              "heartbeat_timeout_s": HEARTBEAT_TIMEOUT_S,
-                             "telemetry_hz": round(1 / TELEMETRY_PERIOD_S)})
+                             "telemetry_hz": round(1 / TELEMETRY_PERIOD_S),
+                             "exclusive_controller_session": True})
             self.telemetry_task = asyncio.create_task(self._telemetry_loop())
             while True:
                 line = await self.reader.readline()
@@ -213,6 +323,8 @@ class ClientSession:
         finally:
             if self.telemetry_task:
                 self.telemetry_task.cancel()
+            if self.authenticated:
+                self.server.release_controller(self)
             self.writer.close()
             with contextlib.suppress(Exception):
                 await self.writer.wait_closed()
@@ -224,41 +336,71 @@ class ClientSession:
             self.last_heartbeat = time.monotonic()
             await self.send({"type": "heartbeat_ack", "monotonic_ns": time.monotonic_ns()})
             return
-        if message_type != "trajectory":
-            raise ValueError("unsupported message type")
-        if time.monotonic() - self.last_heartbeat > HEARTBEAT_TIMEOUT_S:
-            raise ValueError("heartbeat expired")
-        command_id = int(message.get("command_id", 0))
-        if command_id <= self.last_command_id:
-            raise ValueError("command_id is stale or out of order")
-        arm_name = message.get("arm")
-        if arm_name not in self.server.arms:
-            raise ValueError("unknown arm")
-        positions = message.get("positions_rad")
-        duration = float(message.get("duration_s", 0))
-        if (not isinstance(positions, list) or len(positions) != JOINT_COUNT or
-                not all(isinstance(value, (int, float)) for value in positions)):
-            raise ValueError("positions_rad must contain seven numbers")
-        positions = [float(value) for value in positions]
-        if not all(-3.10 <= value <= 3.10 for value in positions):
-            raise ValueError("joint request exceeds gateway absolute bound")
-        if not 0.65 <= duration <= 10.0:
-            raise ValueError("duration_s is outside 0.65...10.0")
+        supported = {
+            "mode_query", "activate", "position_mode", "hold_current",
+            "deactivate", "trajectory",
+        }
+        if message_type not in supported:
+            await self.send({"type": "command_error", "accepted": False,
+                             "error": "unsupported message type"})
+            return
+        try:
+            raw_command_id = message.get("command_id")
+            if (isinstance(raw_command_id, bool) or
+                    not isinstance(raw_command_id, int) or
+                    not 1 <= raw_command_id <= 0xFFFFFFFF):
+                raise ValueError("command_id must be an unsigned 32-bit integer")
+            command_id = raw_command_id
+            if command_id <= self.last_command_id:
+                raise ValueError("command_id is stale or out of order")
+            arm_name = message.get("arm")
+            if arm_name not in self.server.arms:
+                raise ValueError("unknown arm")
+            if (message_type not in {"mode_query", "deactivate"} and
+                    time.monotonic() - self.last_heartbeat > HEARTBEAT_TIMEOUT_S):
+                raise ValueError("heartbeat expired")
+        except (TypeError, ValueError) as error:
+            await self.send({
+                "type": f"{message_type}_ack", "accepted": False,
+                "command_id": message.get("command_id"), "error": str(error),
+            })
+            return
+
+        # Reserve before performing I/O. A timed-out or ambiguously acknowledged
+        # hardware request must never be replayed with the same command ID.
         self.last_command_id = command_id
         started = time.monotonic_ns()
-        response = await self.server.transport.move_joints(
-            self.server.arms[arm_name], command_id, positions, duration
-        )
-        await self.send({
-            "type": "trajectory_ack", "command_id": command_id,
-            "accepted": response == 1, "amber_response": response,
-            "gateway_latency_ms": (time.monotonic_ns() - started) / 1_000_000,
-        })
+        self.command_in_progress = True
+        try:
+            result = await self.server.execute(
+                message_type, command_id, arm_name, message
+            )
+            result.update({
+                "type": f"{message_type}_ack", "command_id": command_id,
+                "arm": arm_name, "accepted": True,
+                "gateway_latency_ms":
+                    (time.monotonic_ns() - started) / 1_000_000,
+            })
+        except (TypeError, ValueError, RuntimeError, OSError,
+                asyncio.TimeoutError) as error:
+            LOGGER.warning("%s command %d rejected: %s",
+                           message_type, command_id, error)
+            result = {
+                "type": f"{message_type}_ack", "command_id": command_id,
+                "arm": arm_name, "accepted": False, "error": str(error),
+                "gateway_latency_ms":
+                    (time.monotonic_ns() - started) / 1_000_000,
+            }
+        finally:
+            self.command_in_progress = False
+        await self.send(result)
 
     async def _telemetry_loop(self) -> None:
         while True:
             await asyncio.sleep(TELEMETRY_PERIOD_S)
-            if time.monotonic() - self.last_heartbeat > HEARTBEAT_TIMEOUT_S:
+            if (not self.command_in_progress and
+                    time.monotonic() - self.last_heartbeat >
+                    HEARTBEAT_TIMEOUT_S):
                 await self.send({"type": "heartbeat_expired"})
                 return
             now = time.monotonic_ns()
@@ -286,10 +428,221 @@ class GatewayServer:
         self.transport = transport
         self.status = status
         self.arms = arms
+        self._operation_locks = {
+            name: asyncio.Lock() for name in arms
+        }
+        self._udp_counter = secrets.randbits(31)
+        self._controller_session: ClientSession | None = None
 
     async def client_connected(self, reader: asyncio.StreamReader,
                                writer: asyncio.StreamWriter) -> None:
         await ClientSession(self, reader, writer).run()
+
+    def claim_controller(self, session: ClientSession) -> bool:
+        if self._controller_session is not None:
+            return False
+        self._controller_session = session
+        return True
+
+    def release_controller(self, session: ClientSession) -> None:
+        if self._controller_session is session:
+            self._controller_session = None
+
+    async def execute(self, operation: str, command_id: int, arm_name: str,
+                      message: dict[str, Any]) -> dict[str, Any]:
+        arm = self.arms[arm_name]
+        async with self._operation_locks[arm_name]:
+            if operation == "mode_query":
+                modes = await self._query_modes(arm)
+                return self._mode_result(modes)
+            if operation == "activate":
+                await self._fresh_state(arm_name, require_new=True)
+                response, modes = await self._set_and_verify_mode(
+                    arm, MODE_ACTIVE
+                )
+                return {"amber_response": response,
+                        **self._mode_result(modes)}
+            if operation == "position_mode":
+                return await self._enter_position_mode(arm, arm_name)
+            if operation == "hold_current":
+                return await self._hold_current(arm, arm_name)
+            if operation == "deactivate":
+                response, modes = await self._set_and_verify_mode(
+                    arm, MODE_INACTIVE
+                )
+                return {"amber_response": response,
+                        **self._mode_result(modes)}
+            if operation == "trajectory":
+                return await self._trajectory(arm, arm_name, command_id, message)
+        raise ValueError("unsupported operation")
+
+    async def _trajectory(self, arm: ArmConfig, arm_name: str, command_id: int,
+                          message: dict[str, Any]) -> dict[str, Any]:
+        positions = message.get("positions_rad")
+        duration_value = message.get("duration_s")
+        if (not isinstance(positions, list) or len(positions) != JOINT_COUNT or
+                not all(isinstance(value, (int, float)) and
+                        not isinstance(value, bool) for value in positions)):
+            raise ValueError("positions_rad must contain seven numbers")
+        positions = [float(value) for value in positions]
+        if not all(math.isfinite(value) for value in positions):
+            raise ValueError("positions_rad values must be finite")
+        for index, (value, limits) in enumerate(
+                zip(positions, JOINT_LIMITS_RAD), start=1):
+            lower, upper = limits
+            if not lower <= value <= upper:
+                raise ValueError(
+                    f"joint {index} request {value} rad is outside "
+                    f"{lower}...{upper} rad"
+                )
+        if (isinstance(duration_value, bool) or
+                not isinstance(duration_value, (int, float))):
+            raise ValueError("duration_s must be a number")
+        duration = float(duration_value)
+        if not math.isfinite(duration) or not 0.65 <= duration <= 10.0:
+            raise ValueError("duration_s is outside 0.65...10.0")
+        modes = await self._query_modes(arm)
+        self._require_modes(modes, MODE_POSITION)
+        await self._fresh_state(arm_name, require_new=False)
+        response = await self.transport.move_joints(
+            arm, command_id, positions, duration
+        )
+        if response != 1:
+            raise RuntimeError(f"Amber rejected trajectory ({response})")
+        return {
+            "amber_response": response, "positions_rad": positions,
+            "duration_s": duration, **self._mode_result(modes),
+        }
+
+    async def _enter_position_mode(self, arm: ArmConfig,
+                                   arm_name: str) -> dict[str, Any]:
+        active_response, active_modes = await self._set_and_verify_mode(
+            arm, MODE_ACTIVE
+        )
+        captured = await self._fresh_state(arm_name, require_new=True)
+        position_response, position_modes = await self._set_and_verify_mode(
+            arm, MODE_POSITION
+        )
+        hold_response = await self.transport.move_joints(
+            arm, self._next_udp_counter(), captured.positions, HOLD_DURATION_S
+        )
+        if hold_response != 1:
+            raise RuntimeError(
+                f"Amber rejected initial position hold ({hold_response})"
+            )
+        return {
+            "amber_response": position_response,
+            "active_amber_response": active_response,
+            "hold_amber_response": hold_response,
+            "captured_positions_rad": captured.positions,
+            "hold_duration_s": HOLD_DURATION_S,
+            "active_modes": active_modes,
+            **self._mode_result(position_modes),
+        }
+
+    async def _hold_current(self, arm: ArmConfig,
+                            arm_name: str) -> dict[str, Any]:
+        modes = await self._query_modes(arm)
+        self._require_modes(modes, MODE_POSITION)
+        captured = await self._fresh_state(arm_name, require_new=True)
+        response = await self.transport.move_joints(
+            arm, self._next_udp_counter(), captured.positions, HOLD_DURATION_S
+        )
+        if response != 1:
+            raise RuntimeError(f"Amber rejected position hold ({response})")
+        return {
+            "amber_response": response,
+            "captured_positions_rad": captured.positions,
+            "hold_duration_s": HOLD_DURATION_S,
+            **self._mode_result(modes),
+        }
+
+    async def _set_and_verify_mode(self, arm: ArmConfig,
+                                   expected: int) -> tuple[int, list[int]]:
+        response = await self.transport.set_mode(
+            arm, self._next_udp_counter(), expected
+        )
+        if response != 1:
+            raise RuntimeError(
+                f"Amber rejected {MODE_NAMES.get(expected, expected)} mode "
+                f"request ({response})"
+            )
+        deadline = time.monotonic() + MODE_TRANSITION_TIMEOUT_S
+        modes: list[int] = []
+        while time.monotonic() < deadline:
+            modes = await self._query_modes(arm)
+            if all(mode == expected for mode in modes):
+                return response, modes
+            await asyncio.sleep(MODE_POLL_PERIOD_S)
+        readable = ",".join(str(mode) for mode in modes) or "unavailable"
+        raise RuntimeError(
+            f"timed out verifying {MODE_NAMES.get(expected, expected)} mode; "
+            f"reported [{readable}]"
+        )
+
+    async def _query_modes(self, arm: ArmConfig) -> list[int]:
+        modes = await self.transport.get_modes(arm, self._next_udp_counter())
+        if (not isinstance(modes, list) or len(modes) != JOINT_COUNT or
+                not all(isinstance(mode, int) and not isinstance(mode, bool)
+                        for mode in modes)):
+            raise RuntimeError("Amber returned an invalid mode array")
+        return modes
+
+    @staticmethod
+    def _require_modes(modes: list[int], expected: int) -> None:
+        if not all(mode == expected for mode in modes):
+            readable = ",".join(str(mode) for mode in modes)
+            raise RuntimeError(
+                f"arm is not in {MODE_NAMES.get(expected, expected)} mode; "
+                f"reported [{readable}]"
+            )
+
+    async def _fresh_state(self, arm_name: str,
+                           require_new: bool) -> ArmState:
+        initial = self.status.snapshot().get(arm_name)
+        initial_sequence = initial.sequence if initial else 0
+        deadline = time.monotonic() + FRESH_TELEMETRY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            state = self.status.snapshot().get(arm_name)
+            if state and self._state_is_valid_and_fresh(state):
+                if not require_new or state.sequence > initial_sequence:
+                    return state
+            await asyncio.sleep(TELEMETRY_PERIOD_S)
+        qualifier = "new, " if require_new else ""
+        raise RuntimeError(
+            f"{qualifier}fresh telemetry is unavailable for {arm_name} arm"
+        )
+
+    @staticmethod
+    def _state_is_valid_and_fresh(state: ArmState) -> bool:
+        if state.monotonic_ns <= 0 or state.sequence <= 0:
+            return False
+        if time.monotonic_ns() - state.monotonic_ns > int(
+                MAX_TELEMETRY_AGE_S * 1_000_000_000):
+            return False
+        vectors = (state.positions, state.velocities,
+                   state.currents, state.statuses)
+        return all(
+            len(values) == JOINT_COUNT and
+            all(isinstance(value, (int, float)) and
+                not isinstance(value, bool) and math.isfinite(float(value))
+                for value in values)
+            for values in vectors
+        )
+
+    @staticmethod
+    def _mode_result(modes: list[int]) -> dict[str, Any]:
+        return {
+            "modes": modes,
+            "mode_names": [MODE_NAMES.get(mode, f"unknown({mode})")
+                           for mode in modes],
+        }
+
+    def _next_udp_counter(self) -> int:
+        self._udp_counter = (self._udp_counter + 1) & 0xFFFFFFFF
+        if self._udp_counter == 0:
+            self._udp_counter = 1
+        return self._udp_counter
 
 
 def read_token(path: Path) -> str:
