@@ -24,20 +24,23 @@ From the repository root:
 - `check` is read-only and compares SHA-256 hashes for every allowlisted file.
 - `pull-host` makes Git match the live host-owned CAN, arm-release, LCM, and
   startup configuration. It does not pull gateway source over local work.
-- `push-gateway` copies only gateway source, tests, and documentation, runs the
-  mocked gateway unit tests on Ubuntu, and installs the tracked systemd unit.
-  It does not restart the service unless `--restart` is supplied.
+- `push-gateway` copies the gateway and guarded recovery sources, runs both
+  fake-only test suites on Ubuntu, and installs the gateway unit plus the
+  reviewed root-owned recovery boundary. It installs the least-privilege
+  `rc.local` but never runs or restarts CAN or either core. It does not restart
+  the gateway service unless `--restart` is supplied.
 
 Set `AMBER_SSH_TARGET` to override the default Bonjour target. SSH credentials
 remain in the user's SSH agent/configuration or interactive prompt; this
 repository does not store them.
 
-Robot launch files, core binaries, CAN mappings, and `/etc/rc.local` are treated
-as host-owned because changing them can affect physical hardware. Review a
-`pull-host` diff before committing it. The sync tool deliberately has no
-automatic command for pushing those files back to the robot.
+Robot launch files and core binaries remain host-owned because changing them
+can affect physical hardware. Review a `pull-host` diff before committing it.
+The reviewed CAN serial map and `rc.local` are also preserved as system state;
+`push-gateway` installs their hardened recovery copies but does not execute
+them.
 
 See [`docs/amber-master-persistence.md`](docs/amber-master-persistence.md) for
 the recovery boundary, installed dependencies, service ordering, and secret
-handling.
-
+handling. See [`docs/amber-stack-recovery.md`](docs/amber-stack-recovery.md)
+for the privileged-helper contract and physical safety requirements.

@@ -14,7 +14,7 @@ Usage: ./scripts/amber-sync.sh COMMAND [--restart]
 Commands:
   check         Read-only SHA-256 comparison of every allowlisted file.
   pull-host     Pull host-owned CAN/arm/LCM/startup files into the repository.
-  push-gateway  Push only gateway files, run fake tests, and install its unit.
+  push-gateway  Push gateway/recovery files, run fake tests, and install them.
 
 Options:
   --restart     With push-gateway, restart only rob-amber-gateway.service.
@@ -23,7 +23,8 @@ Environment:
   AMBER_SSH_TARGET  SSH destination (default: amber@amber-master.local)
 
 This tool never copies tokens or SSH state, never uses --delete, and never
-restarts rc-local, CAN, or either Amber arm core.
+restarts rc-local, CAN, or either Amber arm core. push-gateway installs the
+reviewed least-privilege rc.local for the next boot/recovery but does not run it.
 USAGE
 }
 
@@ -91,6 +92,16 @@ check_sync() {
     printf "@STATE\tavahi-enabled\t%s\n" "$(systemctl is-enabled avahi-daemon.service 2>/dev/null || true)"
     printf "@STATE\tavahi-active\t%s\n" "$(systemctl is-active avahi-daemon.service 2>/dev/null || true)"
     printf "@STATE\ttoken-metadata\t%s\n" "$(stat -c "%a:%U:%G" /etc/rob-amber-gateway/token 2>/dev/null || true)"
+    printf "@STATE\trecovery-helper-metadata\t%s\n" "$(stat -c "%a:%U:%G" /usr/local/sbin/rob-amber-recover 2>/dev/null || true)"
+    printf "@STATE\trecovery-init-metadata\t%s\n" "$(stat -c "%a:%U:%G" /usr/local/libexec/rob-amber-init-can 2>/dev/null || true)"
+    printf "@STATE\trecovery-map-metadata\t%s\n" "$(stat -c "%a:%U:%G" /etc/rob-amber-gateway/can-interfaces.json 2>/dev/null || true)"
+    printf "@STATE\trecovery-sudoers-metadata\t%s\n" "$(stat -c "%a:%U:%G" /etc/sudoers.d/rob-amber-recovery 2>/dev/null || true)"
+    printf "@STATE\trc-local-metadata\t%s\n" "$(stat -c "%a:%U:%G" /etc/rc.local 2>/dev/null || true)"
+    if grep -q "ROB_AMBER_SAFE_RC_LOCAL=1" /etc/rc.local 2>/dev/null; then
+      printf "@STATE\trc-local-contract\tsafe\n"
+    else
+      printf "@STATE\trc-local-contract\tunsafe\n"
+    fi
   ' < "${remote_paths}" > "${remote_hashes}"
 
   while IFS=$'\t' read -r group local_path remote_path; do
@@ -119,6 +130,10 @@ check_sync() {
       hostname) expected="$(tr -d '\r\n' < "${repo_root}/system/etc/hostname")" ;;
       gateway-enabled|gateway-active|avahi-enabled|avahi-active) expected="${local_path##*-}" ;;
       token-metadata) expected="640:root:amber" ;;
+      recovery-helper-metadata|recovery-init-metadata|rc-local-metadata) expected="755:root:root" ;;
+      recovery-map-metadata) expected="644:root:root" ;;
+      recovery-sudoers-metadata) expected="440:root:root" ;;
+      rc-local-contract) expected="safe" ;;
       *) continue ;;
     esac
     if [[ "${remote_path}" == "${expected}" ]]; then
@@ -167,13 +182,52 @@ push_gateway() {
 
   manifest_rows | awk -F '\t' '$1 == "gateway" {sub(/^amber\//, "", $2); print $2}' > "${file_list}"
   rsync -rc --files-from="${file_list}" "${repo_root}/amber/" "${ssh_target}:/home/amber/"
+  rsync -c "${repo_root}/system/etc/rc.local" \
+    "${ssh_target}:/home/amber/rob_gateway/rc.local.reviewed"
 
   ssh -t "${ssh_target}" '
     set -eu
     cd /home/amber/rob_gateway
-    python3 -m py_compile rob_amber_gateway.py test_gateway.py test_rob_amber_gateway.py
-    python3 -m unittest -q test_rob_amber_gateway.py
+    python3 -m py_compile \
+      rob_amber_gateway.py test_gateway.py test_rob_amber_gateway.py \
+      rob_amber_recovery.py rob_amber_init_can.py test_rob_amber_recovery.py
+    python3 -m unittest -q \
+      test_rob_amber_gateway.py test_rob_amber_recovery.py
     sudo install -o root -g root -m 0644 rob-amber-gateway.service /etc/systemd/system/rob-amber-gateway.service
+    sudo install -d -o root -g amber -m 0750 /etc/rob-amber-gateway
+    sudo install -d -o root -g root -m 0755 /usr/local/libexec /usr/local/sbin
+    sudo install -o root -g root -m 0644 can-interfaces.json /etc/rob-amber-gateway/can-interfaces.json
+    sudo install -o root -g root -m 0755 rob_amber_init_can.py /usr/local/libexec/rob-amber-init-can
+    sudo install -o root -g root -m 0755 rob_amber_recovery.py /usr/local/sbin/rob-amber-recover
+    if ! sudo test -e /etc/rc.local.pre-rob-amber-recovery; then
+      sudo install -o root -g root -m 0755 \
+        /etc/rc.local /etc/rc.local.pre-rob-amber-recovery
+    fi
+    sudo install -o root -g root -m 0755 rc.local.reviewed /etc/rc.local
+
+    sudoers_target=/etc/sudoers.d/rob-amber-recovery
+    sudoers_temp=/etc/sudoers.d/.rob-amber-recovery.new
+    sudoers_backup=/etc/sudoers.d/.rob-amber-recovery.previous
+    had_sudoers=false
+    if sudo test -f "${sudoers_target}"; then
+      sudo install -o root -g root -m 0440 "${sudoers_target}" "${sudoers_backup}"
+      had_sudoers=true
+    fi
+    cleanup_sudoers() { sudo rm -f "${sudoers_temp}" "${sudoers_backup}"; }
+    trap cleanup_sudoers EXIT
+    sudo install -o root -g root -m 0440 rob-amber-recovery.sudoers "${sudoers_temp}"
+    sudo /usr/sbin/visudo -cf "${sudoers_temp}"
+    sudo mv -f "${sudoers_temp}" "${sudoers_target}"
+    if ! sudo /usr/sbin/visudo -c; then
+      if [ "${had_sudoers}" = true ]; then
+        sudo mv -f "${sudoers_backup}" "${sudoers_target}"
+      else
+        sudo rm -f "${sudoers_target}"
+      fi
+      exit 1
+    fi
+    sudo rm -f "${sudoers_backup}"
+    trap - EXIT
     sudo systemctl daemon-reload
   '
 
@@ -185,7 +239,7 @@ push_gateway() {
       systemctl show rob-amber-gateway.service -p MainPID -p NRestarts -p ActiveState -p SubState
     '
   else
-    printf '\nGateway files and unit are installed; service was not restarted.\n'
+    printf '\nGateway/recovery files and the reviewed rc.local are installed; no service was restarted.\n'
   fi
   rm -rf -- "${temp_dir:?}"
 }

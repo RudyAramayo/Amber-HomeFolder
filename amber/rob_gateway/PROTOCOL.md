@@ -16,8 +16,10 @@ closed. The owner receives telemetry and is the only session that can query
 modes or issue commands. Ownership is released when its TCP connection closes.
 
 Send a `heartbeat` more frequently than the advertised `heartbeat_timeout_s`.
-Commands other than `mode_query` and the fail-safe `deactivate` are rejected
-after heartbeat expiry.
+Commands other than `mode_query`, `gripper_state`, the fail-safe `deactivate`,
+and `priority_hold` are rejected after heartbeat expiry. Heartbeat expiry also
+cancels every active arm lease, clears the session-local gripper calibration
+acceptances, and runs the measured-pose hold described below.
 
 Every command has a strictly increasing unsigned 32-bit `command_id` and one
 of the arm names `left` or `right`:
@@ -28,13 +30,32 @@ of the arm names `left` or `right`:
 {"type":"position_mode","command_id":3,"arm":"left"}
 {"type":"hold_current","command_id":4,"arm":"left"}
 {"type":"trajectory","command_id":5,"arm":"left","positions_rad":[0,0,0,0,0,0,0],"duration_s":2.0}
-{"type":"deactivate","command_id":6,"arm":"left"}
+{"type":"leased_trajectory","command_id":6,"arm":"left","positions_rad":[0,0,0,0,0,0,0],"duration_s":2.0,"lease_ms":1000}
+{"type":"renew_lease","command_id":7,"arm":"left","lease_ms":1000}
+{"type":"priority_hold","command_id":8,"arm":"left"}
+{"type":"deactivate","command_id":9,"arm":"left"}
 ```
 
 Each reply is named after the request, for example `position_mode_ack`. It
 contains `accepted`, `command_id`, `arm`, and `gateway_latency_ms`. Successful
 mode operations also contain seven `modes` and seven human-readable
 `mode_names`. Rejections have `accepted:false` and an `error` string.
+
+The increasing `command_id` sequence is session-global, while execution uses a
+bounded FIFO queue for each arm. Commands for one arm remain ordered, but left
+and right commands may execute concurrently and their acknowledgements may arrive
+out of command-ID order; clients must correlate every result by `command_id`.
+Each arm accepts at most 32 pending commands. Queue overflow consumes the command
+ID and returns `accepted:false` instead of retaining unbounded work. A
+`priority_hold` is a same-arm barrier: it rejects and removes every older command
+that is still queued, then runs immediately after the one same-arm hardware
+exchange already in progress. An opposite-arm exchange cannot delay it.
+
+Disconnect invalidates controller ownership before in-flight workers drain. No
+late command may install a lease for the departed session; if an Amber trajectory
+crossed the hardware boundary before invalidation, the gateway schedules a fresh
+measured-pose hold. A replacement controller session is not admitted until that
+drain and the disconnect hold sweeps finish.
 
 `position_mode` is deliberately a composite operation:
 
@@ -70,9 +91,162 @@ positions, a duration from 0.65 through 10 seconds, and these inclusive limits:
 | 3–6 | -2.2863 | 2.2863 |
 | 7 | -3.05 | 3.05 |
 
+## Leased trajectories and the backstop hold
+
+`leased_trajectory` applies exactly the same mode, telemetry, position,
+duration, and Amber-response checks as `trajectory`. It additionally requires
+an integer `lease_ms` from 700 through 1500, inclusive. A successful reply
+echoes `lease_ms` and supplies `lease_deadline_monotonic_ns` in the gateway's
+monotonic clock domain.
+
+Each arm has an independent monotonic lease watchdog. Only an Amber-accepted
+leased trajectory replaces that arm's motion lease generation; validation
+failures, mode failures, stale telemetry, and rejected or ambiguous Amber
+requests leave the previous lease in force. Replacing one arm's lease does not
+affect the other arm.
+
+An authenticated exclusive controller can extend the current deadline with:
+
+```json
+{"type":"renew_lease","command_id":7,"arm":"left","lease_ms":1200}
+```
+
+`renew_lease` requires an existing active lease for the selected arm and the
+same integer 700-through-1500 `lease_ms` bounds. It atomically replaces only
+that lease's monotonic watchdog and deadline: it does not query modes, inspect
+telemetry, resend the target trajectory, or perform any Amber UDP I/O. Its
+acknowledgement echoes `lease_ms` and returns the new
+`lease_deadline_monotonic_ns`. Missing leases and invalid values are rejected
+without changing the current lease. Like other motion-authority operations,
+renewal is rejected after heartbeat expiry.
+
+Lease expiry, heartbeat expiry, authenticated-client disconnect/release, and
+gateway shutdown cancel the affected active leases and independently attempt a
+backstop hold for each arm. The gateway:
+
+1. Queries all seven modes without changing them.
+2. Proceeds only when every joint is already in position mode.
+3. Captures a new, finite LCM pose no older than 250 ms.
+4. Sends that measured pose as a 0.65-second trajectory.
+
+The backstop never sends `activate`, `position_mode`, or any other mode-change
+command. If modes are not entirely position, telemetry is unavailable, or
+Amber does not confirm the hold, the gateway logs an unconfirmed hold and does
+not activate the arm. Overlapping expiry, disconnect, heartbeat, and explicit
+hold triggers are coalesced or superseded by a newer accepted per-arm lease so
+stale watchdog work cannot hold a newer trajectory.
+
+`priority_hold` is available to any authenticated controller session even
+after heartbeat expiry and whether or not that arm currently has a lease. It
+cancels the selected arm's active lease and runs the same no-activation hold.
+Its acknowledgement has `accepted:true` when the authenticated request was
+processed and a separate `hold_confirmed` boolean. A confirmed result includes
+the seven captured `captured_positions_rad`, the seven `modes` and
+`mode_names`, `hold_duration_s`, and the Amber response. An unconfirmed result
+has `hold_confirmed:false` and an `error`; known modes are included when the
+mode query succeeded.
+
+The legacy `trajectory` operation does not create or renew a safety lease.
+Remote bounded-motion controllers should use `leased_trajectory` and renew it
+only while they retain their own operator authority and dead-man input.
+Disconnect and heartbeat expiry cancel a renewed lease exactly as they cancel
+its original watchdog and immediately attempt the same backstop hold.
+
 `deactivate` sends mode 0 and verifies all seven mode replies. It remains
 available after heartbeat expiry so an authenticated operator can always
 request the lower-energy state.
+
+## Calibrated gripper control
+
+Gripper requests use the same authenticated, exclusive controller session,
+strictly increasing `command_id`, per-arm operation lock, and heartbeat rules
+as arm commands:
+
+```json
+{"type":"gripper_state","command_id":10,"arm":"left"}
+{"type":"gripper_calibrate","command_id":11,"arm":"left"}
+{"type":"gripper_control","command_id":12,"arm":"left","action":"release","force":5}
+{"type":"gripper_control","command_id":13,"arm":"left","action":"hold","force":10}
+```
+
+The transport is based on the checked-in vendor packet definitions and core:
+
+- Calibration is packed little-endian UDP command 7: a 12-byte request
+  containing the command header and fixed gripper selector 8.
+- Control is packed little-endian UDP command 9: a 13-byte request containing
+  the command header, action 0 for `release`/open or 1 for `hold`/close, a
+  16-bit intensity, and fixed version 0.
+- The companion vendor V2 API documents integer intensity 1 through 300. The
+  gateway enforces those inclusive raw bounds. `force` and
+  `force_unit:"vendor_intensity"` are protocol names only: the repository
+  provides no physical unit or conversion to newtons. A user interface may
+  impose a smaller operating envelope; the legacy dashboard used 2 through
+  20.
+
+The checked-in Amber core returns the generic command response after dispatch
+to its gripper LCM path. An `amber_response` of 1 therefore proves only that
+the core accepted the command for dispatch. It does **not** prove that the
+gripper moved, reached an endpoint, achieved a requested force, or completed
+calibration. Successful calibration replies consequently report:
+
+```json
+{
+  "type":"gripper_calibrate_ack",
+  "command_id":11,
+  "arm":"left",
+  "accepted":true,
+  "amber_response":1,
+  "calibration_command_accepted":true,
+  "calibration_state":"command_accepted_unverified",
+  "calibration_verified":false,
+  "completion_verified":false,
+  "feedback_available":false
+}
+```
+
+The gateway starts each arm at `calibration_state:"required"`. Control is
+allowed only after command 7 returned 1 for that same arm during the same live
+controller session. A new calibration attempt first returns that arm to
+`required`, so a rejection, timeout, or ambiguous response fails closed.
+Calibration acceptance is independently tracked per arm and is cleared on a
+new controller claim, heartbeat expiry, disconnect, gateway shutdown, or stale
+or unavailable telemetry for that arm. Fresh telemetry returning after an
+outage does not restore the previous acceptance. Calibration and control both
+require a same-arm sample no older than 250 ms and revalidate the controller
+session, heartbeat-authority generation, and telemetry after the vendor request
+returns. A late reply after heartbeat expiry or disconnect therefore cannot
+restore acceptance. Calibration is also rejected while that arm has an active
+motion lease or backstop hold. It is intentionally never reported as
+`calibrated` or `verified`.
+
+`gripper_state` performs no Amber I/O and remains queryable after heartbeat
+expiry. It reports the calibration state, raw force bounds and unit,
+`supported_actions:["release","hold"]`, `command_in_flight:false`, and the
+fixed facts `calibration_verified:false` and `feedback_available:false`.
+`gripper_control_ack` echoes the accepted action and raw force and likewise
+reports `completion_verified:false`.
+
+There is no evidence-backed gripper stop/cancel operation. The seven-joint LCM
+arm status has no gripper opening, force, calibration, limit-switch, or object
+detection field. UDP status contains an unlabeled eighth position/speed pair,
+but its gripper identity and units are not established, so the gateway does
+not expose it as gripper feedback. Calibration duration, physical travel,
+required arm mode, calibration completion, and force semantics remain unknown.
+The gateway never auto-calibrates or automatically retries an ambiguous
+calibration/control request.
+Clearing session state on heartbeat expiry or disconnect is bookkeeping only;
+it cannot stop gripper motion that Amber already accepted.
+
+The gateway has no arm-core boot-generation signal. A power cycle that makes
+LCM feedback unavailable or stale is detected and clears that arm's acceptance;
+an extremely fast restart that never produces an observable telemetry gap
+cannot be distinguished from uninterrupted operation. Recalibrate deliberately
+after every known power cycle even if the gateway still reports fresh feedback.
+
+**Calibration safety:** vendor documentation requires recalibration after each
+power cycle, and calibration can cause physical gripper motion. Clear hands and
+objects from the gripper, begin from a safe configuration, and keep the
+physical E-stop available before issuing `gripper_calibrate`.
 
 ## Tests
 

@@ -1,10 +1,18 @@
 # group<TAB>repository path<TAB>absolute path on amber-master
 gateway	amber/rob_gateway/PROTOCOL.md	/home/amber/rob_gateway/PROTOCOL.md
+gateway	amber/rob_gateway/can-interfaces.json	/home/amber/rob_gateway/can-interfaces.json
 gateway	amber/rob_gateway/rob-amber-gateway.service	/home/amber/rob_gateway/rob-amber-gateway.service
+gateway	amber/rob_gateway/rob-amber-recovery.sudoers	/home/amber/rob_gateway/rob-amber-recovery.sudoers
+gateway	amber/rob_gateway/rob_amber_init_can.py	/home/amber/rob_gateway/rob_amber_init_can.py
 gateway	amber/rob_gateway/rob_amber_gateway.py	/home/amber/rob_gateway/rob_amber_gateway.py
+gateway	amber/rob_gateway/rob_amber_recovery.py	/home/amber/rob_gateway/rob_amber_recovery.py
 gateway	amber/rob_gateway/test_gateway.py	/home/amber/rob_gateway/test_gateway.py
 gateway	amber/rob_gateway/test_rob_amber_gateway.py	/home/amber/rob_gateway/test_rob_amber_gateway.py
+gateway	amber/rob_gateway/test_rob_amber_recovery.py	/home/amber/rob_gateway/test_rob_amber_recovery.py
 installed	amber/rob_gateway/rob-amber-gateway.service	/etc/systemd/system/rob-amber-gateway.service
+installed	amber/rob_gateway/can-interfaces.json	/etc/rob-amber-gateway/can-interfaces.json
+installed	amber/rob_gateway/rob_amber_init_can.py	/usr/local/libexec/rob-amber-init-can
+installed	amber/rob_gateway/rob_amber_recovery.py	/usr/local/sbin/rob-amber-recover
 host	amber/init/SerialNumber.txt	/home/amber/init/SerialNumber.txt
 host	amber/init/initCan.sh	/home/amber/init/initCan.sh
 host	amber/L-10/amber_core_L	/home/amber/L-10/amber_core_L

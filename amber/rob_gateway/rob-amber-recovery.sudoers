@@ -1,0 +1,4 @@
+# Installed as /etc/sudoers.d/rob-amber-recovery (root:root 0440).
+# The empty argument string is intentional: it forbids all command arguments.
+Cmnd_Alias ROB_AMBER_RECOVERY = /usr/local/sbin/rob-amber-recover ""
+amber ALL=(root) NOPASSWD: ROB_AMBER_RECOVERY

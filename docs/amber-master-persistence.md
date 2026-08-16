@@ -53,10 +53,19 @@ The installed startup remains:
 4. `rob-amber-gateway.service` exposes authenticated telemetry/control on the
    loopback interface for Cerebro's SSH tunnel.
 
-The current gateway unit is not explicitly ordered after `rc-local.service`.
-That should eventually be replaced with dedicated CAN and arm-core systemd
-units with readiness dependencies. Until that migration is tested, the exact
-working `rc.local` is stored at `system/etc/rc.local`.
+The gateway unit is ordered after and has a `Requisite` on `rc-local.service`.
+`Requisite` deliberately refuses a gateway start when the core stack is down
+without implicitly starting CAN or the arms. Dedicated CAN and arm-core
+systemd units with richer readiness dependencies remain a future migration;
+until then, the reviewed `rc.local` is stored at `system/etc/rc.local`.
+
+The GUI recovery path uses the separately documented root-owned helper and
+least-privilege startup contract. The reviewed serial mapping is installed at
+`/etc/rob-amber-gateway/can-interfaces.json`; privileged CAN initialization is
+installed at `/usr/local/libexec/rob-amber-init-can`; and the vendor cores are
+started by `rc.local` as user `amber`. See
+[`amber-stack-recovery.md`](amber-stack-recovery.md). Recovery never activates
+an arm or sends a motion command.
 
 ## Secrets and runtime data
 
@@ -91,10 +100,12 @@ the recovery contract so Ubuntu can receive security fixes.
 ## Safe synchronization rules
 
 - `check` and `pull-host` may read only the allowlisted paths.
-- `push-gateway` may write only `/home/amber/rob_gateway/*` and the installed
-  gateway systemd unit.
+- `push-gateway` may stage only the reviewed gateway/recovery files, then
+  install the gateway unit, recovery helper, CAN initializer/map, sudoers rule,
+  and least-privilege `rc.local` at their fixed paths.
 - No sync operation uses `--delete`.
-- No sync operation restarts CAN, `rc-local`, or either Amber core.
+- No sync operation restarts CAN, `rc-local`, or either Amber core. Installing
+  recovery artifacts does not invoke the recovery helper.
 - Gateway unit tests use fake transports and do not send UDP, LCM, CAN, or arm
   commands.
 - Deploying robot launch/CAN files remains an explicit, reviewed manual action.
