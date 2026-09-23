@@ -90,6 +90,24 @@ The acknowledgement includes `active_modes`, `captured_positions_rad`, and the
 three vendor responses. `hold_current` similarly requires verified position
 mode, captures a new telemetry sample, and holds that measured pose.
 
+The deployed core can return vendor response `0` after actually changing mode
+(observed on L10 activation on 2026-09-23). For mode changes only, the gateway
+reconciles that response with all seven mode-query results **and a new, fresh
+CAN-backed sample whose seven joint statuses match the requested mode**.
+Disagreement or missing feedback fails the operation; it never resends the
+change to obtain a different acknowledgement. The original `0` remains in
+`amber_response`. Response `1` retains the existing mode-query verification;
+other response values fail immediately. Trajectory and gripper acknowledgement
+requirements are unchanged.
+
+This update passed 54 gateway fixtures locally and on the robot and was deployed
+to `/home/amber/rob_gateway` on 2026-09-23. Only `rob-amber-gateway.service` was
+restarted, and its active status and deployed hashes were verified. Source
+SHA-256: `abf962f8487ce4a66d0ba7c20966e0dcb4db7c4c404bf184feac29a0c07a38c1`;
+test SHA-256: `0a4d5a2c72dace63462cd535a3afe3be66d4c1637521082652234d90ba7f43e7`.
+The replaced files are retained in `.mode-reconcile.woCaLA` on that robot.
+Fixture success does not establish completion of a live arm route.
+
 Normal `trajectory` requests are accepted only while all seven joints report
 position mode and LCM telemetry is fresh. Requests require exactly seven finite
 positions, a duration from 0.65 through 10 seconds, and these inclusive limits:

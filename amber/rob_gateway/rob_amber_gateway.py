@@ -1483,7 +1483,7 @@ class GatewayServer:
         response = await self.transport.set_mode(
             arm, self._next_udp_counter(), expected
         )
-        if response != 1:
+        if response not in (0, 1):
             raise RuntimeError(
                 f"Amber rejected {MODE_NAMES.get(expected, expected)} mode "
                 f"request ({response})"
@@ -1493,12 +1493,21 @@ class GatewayServer:
         while time.monotonic() < deadline:
             modes = await self._query_modes(arm)
             if all(mode == expected for mode in modes):
-                return response, modes
+                if response == 1:
+                    return response, modes
+                # The deployed core can reply 0 while applying the requested
+                # mode (observed on L10 activation). Never reinterpret 0 as an
+                # acknowledgement or resend the change. Reconcile it with both
+                # all seven mode readbacks and a NEW CAN-backed status sample.
+                state = await self._fresh_state(arm.name, require_new=True)
+                if all(status == expected for status in state.statuses):
+                    LOGGER.warning("%s mode %s verified by fresh joint status despite Amber reply 0", arm.name, expected)
+                    return response, modes
             await asyncio.sleep(MODE_POLL_PERIOD_S)
         readable = ",".join(str(mode) for mode in modes) or "unavailable"
         raise RuntimeError(
             f"timed out verifying {MODE_NAMES.get(expected, expected)} mode; "
-            f"reported [{readable}]"
+            f"reported [{readable}], acknowledgement {response}"
         )
 
     async def _query_modes(self, arm: ArmConfig) -> list[int]:

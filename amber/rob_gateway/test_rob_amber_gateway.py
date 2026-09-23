@@ -26,6 +26,7 @@ class FakeTransport:
         }
         self.calls: list[tuple] = []
         self.apply_mode = True
+        self.mode_response = 1
         self.gripper_calibration_response = 1
         self.gripper_control_response = 1
         self.move_started = {
@@ -42,7 +43,7 @@ class FakeTransport:
         self.calls.append(("set_mode", arm.name, command_id, mode))
         if self.apply_mode:
             self.modes[arm.name] = [mode] * gateway.JOINT_COUNT
-        return 1
+        return self.mode_response
 
     async def get_modes(self, arm: gateway.ArmConfig,
                         command_id: int) -> list[int]:
@@ -1376,6 +1377,40 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
             })
         self.assertFalse(response["accepted"])
         self.assertIn("timed out verifying active mode", response["error"])
+
+    async def test_zero_mode_reply_requires_new_confirming_motor_status(self):
+        self.transport.mode_response = 0
+        reader, writer = await self.authenticate()
+        response = await self.command(reader, writer, {
+            "type": "activate", "command_id": 1, "arm": "left",
+        })
+        self.assertTrue(response["accepted"])
+        self.assertEqual(response["amber_response"], 0)
+        self.assertEqual(response["modes"], [gateway.MODE_ACTIVE] * 7)
+        self.assertEqual(sum(call[0] == "set_mode" for call in self.transport.calls), 1)
+
+    async def test_zero_reply_with_disagreeing_motor_status_cannot_progress(self):
+        self.transport.mode_response = 0
+        self.status.states["left"].statuses = [0] * 7
+        reader, writer = await self.authenticate()
+        with mock.patch.object(gateway, "MODE_TRANSITION_TIMEOUT_S", 0.06):
+            response = await self.command(reader, writer, {
+                "type": "position_mode", "command_id": 1, "arm": "left",
+            })
+        self.assertFalse(response["accepted"])
+        self.assertEqual(sum(call[0] == "set_mode" for call in self.transport.calls), 1)
+        self.assertFalse(any(call[0] == "move_joints" for call in self.transport.calls))
+
+    async def test_zero_reply_without_applied_mode_cannot_progress(self):
+        self.transport.mode_response = 0
+        self.transport.apply_mode = False
+        reader, writer = await self.authenticate()
+        with mock.patch.object(gateway, "MODE_TRANSITION_TIMEOUT_S", 0.06):
+            response = await self.command(reader, writer, {
+                "type": "position_mode", "command_id": 1, "arm": "left",
+            })
+        self.assertFalse(response["accepted"])
+        self.assertFalse(any(call[0] == "move_joints" for call in self.transport.calls))
 
     def test_vendor_mode_packet_layouts(self):
         self.assertEqual(ctypes.sizeof(gateway.ModeCommand), 10)
