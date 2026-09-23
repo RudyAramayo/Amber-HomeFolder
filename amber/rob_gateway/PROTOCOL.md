@@ -106,7 +106,54 @@ including position-mode entry, priority holds, and disconnect/lease backstops.
 The UDP transport also validates every outgoing joint vector before opening a
 socket. Invalid feedback blocks activation and movement; `deactivate` and
 `mode_query` remain available. These checks do not establish physical clearance
-or per-servo freshness: the vendor core can continue publishing cached data.
+by themselves: the vendor core can continue publishing cached data. The
+independent CAN checks below also apply before activation, trajectories and
+every measured-pose hold.
+
+## Independent motor feedback
+
+The September 22 wrist probe exposed a partial bus loss: only CAN reply ID
+`0x91` remained on physical right / L10 / can10, while the core kept publishing
+all seven cached joint values with advancing LCM sequence numbers. Core packet
+arrival therefore cannot establish individual motor freshness.
+
+The gateway passively listens on `--left-can-interface can10` and
+`--right-can-interface can11`. These names follow the **legacy core identities**:
+gateway `left` is physical right, and gateway `right` is physical left. The
+interfaces must be distinct. This monitor never transmits a CAN frame or
+changes an interface, motor mode or target. It accepts only complete remote
+standard replies `0x91` through `0x98`, rejecting local transmit echoes,
+truncated, extended, remote-request and error frames.
+
+Telemetry adds:
+
+- `controller_sample_age_ms`: age of the most recent LCM callback;
+- `joint_feedback_age_ms`: seven kernel CAN receive ages, with `null` for a
+  motor that has not replied since the monitor started or was invalidated;
+- `gripper_feedback_age_ms`: the corresponding age for `0x98`;
+- `sample_age_ms`: the maximum of the controller age and all seven joint
+  feedback ages, or `null` if any required observation is unknown.
+
+Kernel timestamps prevent an old queued reply from acquiring a new receipt
+time when the listener catches up. The deployed Linux monitor requires
+`SO_TIMESTAMPNS_NEW`; unavailable timestamps fail closed. Interface/socket
+failure invalidates its observations, and a detected wall/monotonic clock
+alignment change flushes the queue before reacquiring feedback. See the
+[Linux timestamp interface](https://docs.kernel.org/networking/timestamping.html).
+
+All seven joint replies and LCM must be at most 250 ms old before a new arm
+command is admitted. Gripper calibration/control additionally requires a
+current eighth reply; losing it clears calibration acceptance. Positions,
+currents and modes remain visible as **cached controller data** when feedback
+is missing. A reply establishes device liveness, not verified physical
+position, velocity, gripper completion or clearance. A core mode acknowledgement
+alone does not prove that an unreachable servo changed mode.
+
+Deactivation and mode queries remain available. No command is replayed by the
+monitor when feedback returns. These admission checks do **not** cancel an
+already dispatched vendor trajectory or clear a target retained in the core
+or motor. Support/power isolation and supervised recovery remain necessary
+after communication loss; software cannot hold an unreachable motor.
 
 ## Telemetry units and availability
 

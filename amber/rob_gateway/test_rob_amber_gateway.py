@@ -7,6 +7,8 @@ import asyncio
 import ctypes
 import json
 import math
+import socket
+import struct
 import threading
 import time
 import unittest
@@ -72,6 +74,7 @@ class FakeTransport:
 class FakeStatus:
     def __init__(self, advancing: bool = True) -> None:
         self.advancing = advancing
+        self.silent_devices = {"left": set(), "right": set()}
         self.states = {
             "left": gateway.ArmState(
                 positions=[0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
@@ -79,6 +82,7 @@ class FakeStatus:
                 currents=[0.2] * gateway.JOINT_COUNT,
                 statuses=[1.0] * gateway.JOINT_COUNT,
                 monotonic_ns=time.monotonic_ns(), sequence=1,
+                feedback_monotonic_ns=[time.monotonic_ns()] * 8,
             ),
             "right": gateway.ArmState(
                 positions=[-0.1, 0.2, -0.3, 0.4, -0.5, 0.6, -0.7],
@@ -86,14 +90,18 @@ class FakeStatus:
                 currents=[0.2] * gateway.JOINT_COUNT,
                 statuses=[1.0] * gateway.JOINT_COUNT,
                 monotonic_ns=time.monotonic_ns(), sequence=1,
+                feedback_monotonic_ns=[time.monotonic_ns()] * 8,
             ),
         }
 
     def snapshot(self) -> dict[str, gateway.ArmState]:
         if self.advancing:
-            for state in self.states.values():
+            for name, state in self.states.items():
                 state.sequence += 1
                 state.monotonic_ns = time.monotonic_ns()
+                for index in range(8):
+                    if index not in self.silent_devices[name]:
+                        state.feedback_monotonic_ns[index] = time.monotonic_ns()
         return {
             name: gateway.ArmState(
                 positions=list(state.positions),
@@ -103,6 +111,7 @@ class FakeStatus:
                 monotonic_ns=state.monotonic_ns,
                 sequence=state.sequence,
                 velocities_available=state.velocities_available,
+                feedback_monotonic_ns=list(state.feedback_monotonic_ns),
             )
             for name, state in self.states.items()
         }
@@ -907,6 +916,40 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(call[0] == "set_mode"
                              for call in self.transport.calls))
 
+    async def test_advancing_lcm_cannot_freshen_missing_motor_feedback(self):
+        self.status.silent_devices["left"] = set(range(1, 8))
+        self.status.states["left"].feedback_monotonic_ns[1:] = [0] * 7
+        self.transport.modes["left"] = [2] * 7
+        reader, writer = await self.authenticate()
+        sample = await self.read_until(reader, "telemetry")
+        self.assertEqual(sample["arm"], "left")
+        self.assertIsNone(sample["sample_age_ms"])
+        self.assertLess(sample["controller_sample_age_ms"], 250)
+        self.assertIsNotNone(sample["joint_feedback_age_ms"][0])
+        self.assertEqual(sample["joint_feedback_age_ms"][1:], [None] * 6)
+        with mock.patch.object(gateway, "FRESH_TELEMETRY_TIMEOUT_S", 0.06):
+            response = await self.command(reader, writer, {
+                "type": "trajectory", "command_id": 1, "arm": "left",
+                "positions_rad": [0.0] * 7, "duration_s": 4,
+            })
+        self.assertFalse(response["accepted"])
+        self.assertFalse(any(call[0] == "move_joints" for call in self.transport.calls))
+        # Keep deactivation available even when mode/position data is cached.
+        stopped = await self.command(reader, writer, {
+            "type": "deactivate", "command_id": 2, "arm": "left",
+        })
+        self.assertTrue(stopped["accepted"])
+
+    async def test_missing_gripper_reply_blocks_calibration_with_live_arm(self):
+        self.status.silent_devices["left"] = {7}
+        self.status.states["left"].feedback_monotonic_ns[7] = 0
+        reader, writer = await self.authenticate()
+        response = await self.command(reader, writer, {
+            "type": "gripper_calibrate", "command_id": 1, "arm": "left",
+        })
+        self.assertFalse(response["accepted"])
+        self.assertFalse(any(call[0] == "calibrate_gripper" for call in self.transport.calls))
+
     async def test_deactivate_remains_available_after_heartbeat_expiry(self):
         with mock.patch.object(gateway, "HEARTBEAT_TIMEOUT_S", 0.02):
             reader, writer = await self.authenticate()
@@ -1389,6 +1432,67 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(command.version)
 
 
+class CANFeedbackTests(unittest.TestCase):
+    def test_queued_kernel_reply_keeps_its_age_and_requires_valid_timestamp(self):
+        cls = gateway.CANFeedbackMonitor
+        ancillary = [(socket.SOL_SOCKET, cls._TIMESTAMP_OPTION, struct.pack("=qq", 100, 0))]
+        # Consuming a 400 ms old reply does not give it a new arrival time.
+        arrival = cls._kernel_arrival_ns(ancillary, 0, 2_000_000_000, 100_400_000_000)
+        self.assertEqual(arrival, 1_600_000_000)
+        self.assertEqual(gateway.feedback_age_ms(arrival, 2_000_000_000), 400)
+        self.assertIsNone(cls._kernel_arrival_ns([], 0, 2_000_000_000, 100_400_000_000))
+        self.assertIsNone(cls._kernel_arrival_ns(ancillary, socket.MSG_CTRUNC, 2_000_000_000, 100_400_000_000))
+        self.assertIsNone(cls._kernel_arrival_ns(ancillary, 0, 2_000_000_000, 99_999_999_999))
+        invalid = [(socket.SOL_SOCKET, cls._TIMESTAMP_OPTION, struct.pack("=qq", 100, 1_000_000_000))]
+        self.assertIsNone(cls._kernel_arrival_ns(invalid, 0, 2_000_000_000, 100_400_000_000))
+
+    def test_cached_joint_data_expires_while_core_and_one_motor_advance(self):
+        arms = {"left": gateway.ArmConfig("left", 26001, "Left_ArmStatus", "can10")}
+        monitor = gateway.CANFeedbackMonitor(arms)
+        # macOS Python 3.9 may use a process-relative monotonic epoch, so
+        # subtracting 300 ms just after launch can produce an invalid time.
+        began = 1_000_000_000
+        for identifier in range(0x91, 0x99):
+            monitor._receive("left", struct.pack("=IB3x8s", identifier, 8, bytes(8)), 0, began)
+        now = began + 300_000_000
+        monitor._receive("left", struct.pack("=IB3x8s", 0x91, 8, bytes(8)), 0, now)
+        state = gateway.ArmState(monotonic_ns=now, sequence=1234,
+                                 feedback_monotonic_ns=monitor.snapshot("left"))
+        self.assertGreaterEqual(gateway.effective_sample_age_ms(state, now), 300)
+        with mock.patch.object(gateway.time, "monotonic_ns", return_value=now):
+            self.assertFalse(gateway.GatewayServer._state_is_valid_and_fresh(state))
+        # Real replies from the missing devices can restore liveness; no
+        # controller mode acknowledgement or repeated LCM packet can do so.
+        for identifier in range(0x92, 0x99):
+            monitor._receive("left", struct.pack("=IB3x8s", identifier, 8, bytes(8)), 0, now)
+        state.feedback_monotonic_ns = monitor.snapshot("left")
+        with mock.patch.object(gateway.time, "monotonic_ns", return_value=now):
+            self.assertTrue(gateway.GatewayServer._state_is_valid_and_fresh(state))
+        monitor._invalidate("left")
+        state.feedback_monotonic_ns = monitor.snapshot("left")
+        self.assertIsNone(gateway.effective_sample_age_ms(state, now))
+
+    def test_only_complete_remote_device_replies_establish_liveness(self):
+        monitor = gateway.CANFeedbackMonitor({
+            "left": gateway.ArmConfig("left", 26001, "Left_ArmStatus", "can10"),
+            "right": gateway.ArmConfig("right", 26002, "Right_ArmStatus", "can11"),
+        })
+        for identifier, length, flags in [
+            (0x11, 8, 0), (0x91, 7, 0), (0x91, 8, socket.MSG_DONTROUTE),
+            (0x91, 8, socket.MSG_TRUNC), (0x80000091, 8, 0),
+            (0x40000091, 8, 0), (0x20000091, 8, 0),
+        ]:
+            monitor._receive("left", struct.pack("=IB3x8s", identifier, length, bytes(8)), flags, 10)
+        monitor._receive("left", bytes(15), 0, 10)
+        self.assertEqual(monitor.snapshot("left"), [0] * 8)
+        monitor._receive("left", struct.pack("=IB3x8s", 0x96, 8, bytes(8)), 0, 10)
+        self.assertEqual(monitor.snapshot("left"), [0, 0, 0, 0, 0, 10, 0, 0])
+        self.assertEqual(monitor.snapshot("right"), [0] * 8)
+        snapshot = monitor.snapshot("left")
+        snapshot[5] = 99
+        self.assertEqual(monitor.snapshot("left")[5], 10)
+
+
 class TelemetryBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_lcm_degrees_are_normalized_once_and_velocity_is_not_invented(self):
         degrees = [0.0, -119.1484375, 0.0, 38.203125, 0.0, -1.609375, 0.0]
@@ -1401,6 +1505,7 @@ class TelemetryBoundaryTests(unittest.IsolatedAsyncioTestCase):
         bridge._arm_status_type = SimpleNamespace(decode=lambda data: message)
         bridge._states = {"left": gateway.ArmState()}
         bridge._lock = threading.Lock()
+        bridge._feedback = SimpleNamespace(snapshot=lambda name: [time.monotonic_ns()] * 8)
         bridge._handler("left")("Left_ArmStatus", b"fixture")
         state = bridge.snapshot()["left"]
         for raw, normalized in zip(degrees, state.positions):

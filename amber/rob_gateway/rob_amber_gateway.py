@@ -19,6 +19,7 @@ import logging
 import math
 import secrets
 import socket
+import struct
 import sys
 import threading
 import time
@@ -176,6 +177,7 @@ class ArmConfig:
     name: str
     udp_port: int
     status_channel: str
+    can_interface: str = ""
 
 
 @dataclass
@@ -187,6 +189,115 @@ class ArmState:
     monotonic_ns: int = 0
     sequence: int = 0
     velocities_available: bool = True
+    # LCM can keep publishing cached positions after individual CAN devices
+    # disappear. Only independently received device replies advance these.
+    feedback_monotonic_ns: list[int] = field(default_factory=lambda: [0] * 8)
+
+
+def feedback_age_ms(timestamp: int, now: int) -> float | None:
+    return (now - timestamp) / 1_000_000 if 0 < timestamp <= now else None
+
+
+def effective_sample_age_ms(state: ArmState, now: int) -> float | None:
+    if len(state.feedback_monotonic_ns) != 8:
+        return None
+    ages = [feedback_age_ms(t, now) for t in
+            [state.monotonic_ns, *state.feedback_monotonic_ns[:JOINT_COUNT]]]
+    return None if any(age is None for age in ages) else max(ages)
+
+
+class CANFeedbackMonitor:
+    """Receive-only liveness evidence for the seven joints and gripper.
+
+    Never transmits, changes interface state, changes modes, or retries motor
+    commands. A socket/interface failure invalidates all its observations.
+    """
+
+    # Linux SO_TIMESTAMPNS_NEW has a fixed pair of signed 64-bit timespec
+    # fields. Use kernel arrival time so draining an old receive queue cannot
+    # make silent motors appear fresh. See networking/timestamping in Linux.
+    _TIMESTAMP_OPTION = 64
+
+    @classmethod
+    def _kernel_arrival_ns(cls, ancillary: list, flags: int,
+                           now_monotonic: int, now_wall: int) -> int | None:
+        if flags & socket.MSG_CTRUNC:
+            return None
+        for level, kind, value in ancillary:
+            if level == socket.SOL_SOCKET and kind == cls._TIMESTAMP_OPTION and len(value) == 16:
+                seconds, nanos = struct.unpack("=qq", value)
+                if seconds <= 0 or not 0 <= nanos < 1_000_000_000:
+                    return None
+                age = now_wall - (seconds * 1_000_000_000 + nanos)
+                return now_monotonic - age if 0 <= age < now_monotonic else None
+        return None
+
+    def __init__(self, arms: dict[str, ArmConfig]) -> None:
+        self._arms = arms
+        self._last = {name: [0] * 8 for name in arms}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+    def start(self) -> None:
+        for name, arm in self._arms.items():
+            thread = threading.Thread(target=self._run, args=(name, arm.can_interface),
+                                      name=f"amber-can-feedback-{name}", daemon=True)
+            self._threads.append(thread)
+            thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(timeout=1)
+
+    def snapshot(self, name: str) -> list[int]:
+        with self._lock:
+            return list(self._last[name])
+
+    def _invalidate(self, name: str) -> None:
+        with self._lock:
+            self._last[name] = [0] * 8
+
+    def _receive(self, name: str, frame: bytes, flags: int, now: int) -> None:
+        if len(frame) != 16 or flags & (socket.MSG_DONTROUTE | socket.MSG_TRUNC):
+            return
+        identifier, length, _data = struct.unpack("=IB3x8s", frame)
+        # Exact standard reply IDs exclude outgoing setpoints (0x11–0x17),
+        # remote frames, extended frames and CAN error notifications.
+        if length != 8 or not 0x91 <= identifier <= 0x98:
+            return
+        with self._lock:
+            self._last[name][identifier - 0x91] = now
+
+    def _run(self, name: str, interface: str) -> None:
+        while not self._stop.is_set():
+            try:
+                if not interface:
+                    raise OSError("An explicit per-arm CAN interface is required")
+                with socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as sock:
+                    sock.settimeout(0.1)
+                    sock.setsockopt(socket.SOL_SOCKET, self._TIMESTAMP_OPTION, 1)
+                    sock.bind((interface,))
+                    self._invalidate(name)
+                    clock_offset = time.time_ns() - time.monotonic_ns()
+                    while not self._stop.is_set():
+                        try:
+                            frame, ancillary, flags, _address = sock.recvmsg(16, socket.CMSG_SPACE(16))
+                        except socket.timeout:
+                            continue
+                        now_wall, now_monotonic = time.time_ns(), time.monotonic_ns()
+                        if abs(now_wall - now_monotonic - clock_offset) > 5_000_000:
+                            # A wall-clock step can invalidate kernel-age
+                            # conversion. Flush this socket and reacquire.
+                            raise OSError("Clock alignment changed; discarding queued CAN feedback")
+                        arrived = self._kernel_arrival_ns(ancillary, flags, now_monotonic, now_wall)
+                        if arrived is not None:
+                            self._receive(name, frame, flags, arrived)
+            except (OSError, AttributeError) as error:
+                self._invalidate(name)
+                LOGGER.warning("CAN feedback unavailable for %s on %s: %s", name, interface, error)
+                self._stop.wait(1)
 
 
 @dataclass(frozen=True)
@@ -353,16 +464,19 @@ class LCMStatusBridge:
         self._states = {name: ArmState() for name in arms}
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._feedback = CANFeedbackMonitor(arms)
         for name, arm in arms.items():
             self._lcm.subscribe(arm.status_channel, self._handler(name))
         self._thread = threading.Thread(target=self._run, name="amber-lcm-status", daemon=True)
 
     def start(self) -> None:
+        self._feedback.start()
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=1)
+        self._feedback.stop()
 
     def snapshot(self) -> dict[str, ArmState]:
         with self._lock:
@@ -372,6 +486,7 @@ class LCMStatusBridge:
                     currents=list(state.currents), statuses=list(state.statuses),
                     monotonic_ns=state.monotonic_ns, sequence=state.sequence,
                     velocities_available=state.velocities_available,
+                    feedback_monotonic_ns=self._feedback.snapshot(name),
                 )
                 for name, state in self._states.items()
             }
@@ -700,15 +815,19 @@ class ClientSession:
                     HEARTBEAT_TIMEOUT_S):
                 await self._expire_heartbeat_authority()
                 continue
-            now = time.monotonic_ns()
             states = self.server.status.snapshot()
             self.server.clear_stale_gripper_calibrations(states)
+            now = time.monotonic_ns()
             for arm_name, state in states.items():
                 await self.send({
                     "type": "telemetry", "arm": arm_name,
                     "sequence": state.sequence, "gateway_monotonic_ns": now,
-                    "sample_age_ms": None if not state.monotonic_ns else
-                        (now - state.monotonic_ns) / 1_000_000,
+                    "sample_age_ms": effective_sample_age_ms(state, now),
+                    "controller_sample_age_ms": feedback_age_ms(state.monotonic_ns, now),
+                    "joint_feedback_age_ms": [feedback_age_ms(t, now)
+                        for t in state.feedback_monotonic_ns[:JOINT_COUNT]],
+                    "gripper_feedback_age_ms": feedback_age_ms(state.feedback_monotonic_ns[7], now)
+                        if len(state.feedback_monotonic_ns) == 8 else None,
                     "positions_rad": state.positions,
                     "velocities_rad_s": state.velocities
                         if state.velocities_available else None,
@@ -843,7 +962,7 @@ class GatewayServer:
             self, states: dict[str, ArmState]) -> None:
         for arm_name in self.arms:
             state = states.get(arm_name)
-            if state is None or not self._state_is_valid_and_fresh(state):
+            if state is None or not self._gripper_state_is_fresh(state):
                 self.clear_gripper_calibration(
                     arm_name, "arm_telemetry_stale_or_unavailable"
                 )
@@ -1262,7 +1381,7 @@ class GatewayServer:
 
     def _clear_gripper_if_telemetry_stale(self, arm_name: str) -> bool:
         state = self.status.snapshot().get(arm_name)
-        if state is not None and self._state_is_valid_and_fresh(state):
+        if state is not None and self._gripper_state_is_fresh(state):
             return False
         self.clear_gripper_calibration(
             arm_name, "arm_telemetry_stale_or_unavailable"
@@ -1416,11 +1535,18 @@ class GatewayServer:
         )
 
     @staticmethod
+    def _gripper_state_is_fresh(state: ArmState) -> bool:
+        if not GatewayServer._state_is_valid_and_fresh(state):
+            return False
+        age = feedback_age_ms(state.feedback_monotonic_ns[7], time.monotonic_ns())
+        return age is not None and 0 <= age <= MAX_TELEMETRY_AGE_S * 1_000
+
+    @staticmethod
     def _state_is_valid_and_fresh(state: ArmState) -> bool:
         if state.monotonic_ns <= 0 or state.sequence <= 0:
             return False
-        age_ns = time.monotonic_ns() - state.monotonic_ns
-        if not 0 <= age_ns <= int(MAX_TELEMETRY_AGE_S * 1_000_000_000):
+        age_ms = effective_sample_age_ms(state, time.monotonic_ns())
+        if age_ms is None or not 0 <= age_ms <= MAX_TELEMETRY_AGE_S * 1_000:
             return False
         try:
             validate_positions(state.positions)
@@ -1461,9 +1587,11 @@ def read_token(path: Path) -> str:
 
 async def async_main(args: argparse.Namespace) -> None:
     arms = {
-        "left": ArmConfig("left", args.left_udp_port, "Left_ArmStatus"),
-        "right": ArmConfig("right", args.right_udp_port, "Right_ArmStatus"),
+        "left": ArmConfig("left", args.left_udp_port, "Left_ArmStatus", args.left_can_interface),
+        "right": ArmConfig("right", args.right_udp_port, "Right_ArmStatus", args.right_can_interface),
     }
+    if not args.left_can_interface or not args.right_can_interface or args.left_can_interface == args.right_can_interface:
+        raise ValueError("Arm feedback monitors require two distinct CAN interfaces")
     status = LCMStatusBridge(Path(args.lcm_types), arms)
     status.start()
     gateway = GatewayServer(read_token(Path(args.token_file)),
@@ -1488,6 +1616,8 @@ def main() -> None:
     parser.add_argument("--amber-host", default="127.0.0.1")
     parser.add_argument("--left-udp-port", type=int, default=26001)
     parser.add_argument("--right-udp-port", type=int, default=26002)
+    parser.add_argument("--left-can-interface", default="can10")
+    parser.add_argument("--right-can-interface", default="can11")
     parser.add_argument("--token-file", default="/etc/rob-amber-gateway/token")
     parser.add_argument("--lcm-types", default="/home/amber/sin_wave")
     parser.add_argument("--log-level", default="INFO")
