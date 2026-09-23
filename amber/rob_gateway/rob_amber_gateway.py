@@ -75,6 +75,25 @@ MODE_NAMES = {
 LOGGER = logging.getLogger("rob-amber-gateway")
 
 
+def validate_positions(positions: Any) -> list[float]:
+    """Validate every UDP target, including targets copied from feedback."""
+    if (not isinstance(positions, list) or len(positions) != JOINT_COUNT or
+            not all(isinstance(value, (int, float)) and
+                    not isinstance(value, bool) for value in positions)):
+        raise ValueError("positions_rad must contain seven numbers")
+    result = [float(value) for value in positions]
+    if not all(math.isfinite(value) for value in result):
+        raise ValueError("positions_rad values must be finite")
+    for index, (value, (lower, upper)) in enumerate(
+            zip(result, JOINT_LIMITS_RAD), start=1):
+        if not lower <= value <= upper:
+            raise ValueError(
+                f"joint {index} request {value} rad is outside "
+                f"{lower}...{upper} rad"
+            )
+    return result
+
+
 class JointCommand(ctypes.LittleEndianStructure):
     _pack_ = 1
     _fields_ = [
@@ -167,6 +186,7 @@ class ArmState:
     statuses: list[float] = field(default_factory=lambda: [10.0] * JOINT_COUNT)
     monotonic_ns: int = 0
     sequence: int = 0
+    velocities_available: bool = True
 
 
 @dataclass(frozen=True)
@@ -207,6 +227,7 @@ class AmberUDPTransport:
 
     def _move_joints_blocking(self, arm: ArmConfig, command_id: int,
                               positions: list[float], duration: float) -> int:
+        positions = validate_positions(positions)
         payload = JointCommand()
         payload.cmd_no = 4
         payload.length = ctypes.sizeof(JointCommand)
@@ -350,6 +371,7 @@ class LCMStatusBridge:
                     positions=list(state.positions), velocities=list(state.velocities),
                     currents=list(state.currents), statuses=list(state.statuses),
                     monotonic_ns=state.monotonic_ns, sequence=state.sequence,
+                    velocities_available=state.velocities_available,
                 )
                 for name, state in self._states.items()
             }
@@ -359,8 +381,15 @@ class LCMStatusBridge:
             message = self._arm_status_type.decode(data)
             with self._lock:
                 state = self._states[arm_name]
-                state.positions = list(message.jointPosition)
-                state.velocities = list(message.jointVelocity)
+                # The installed Amber core publishes jointPositionNow in
+                # degrees; UDP command 1 divides the same values by 57.2958.
+                # Normalize exactly once at the LCM boundary (see PROTOCOL.md).
+                state.positions = [math.radians(q) for q in message.jointPosition]
+                # This core forwards an undocumented raw CAN velocity field.
+                # Its scale/validity has not been verified. Do not mislabel it
+                # as rad/s or substitute zeros that could certify standstill.
+                state.velocities = []
+                state.velocities_available = False
                 state.currents = list(message.jointCurrent)
                 state.statuses = list(message.jointStatus)
                 state.monotonic_ns = time.monotonic_ns()
@@ -681,7 +710,9 @@ class ClientSession:
                     "sample_age_ms": None if not state.monotonic_ns else
                         (now - state.monotonic_ns) / 1_000_000,
                     "positions_rad": state.positions,
-                    "velocities_rad_s": state.velocities,
+                    "velocities_rad_s": state.velocities
+                        if state.velocities_available else None,
+                    "velocities_available": state.velocities_available,
                     "currents": state.currents, "statuses": state.statuses,
                 })
 
@@ -1248,23 +1279,8 @@ class GatewayServer:
             self, arm: ArmConfig, arm_name: str, command_id: int,
             message: dict[str, Any], session: ClientSession,
             controller_generation: int) -> dict[str, Any]:
-        positions = message.get("positions_rad")
+        positions = validate_positions(message.get("positions_rad"))
         duration_value = message.get("duration_s")
-        if (not isinstance(positions, list) or len(positions) != JOINT_COUNT or
-                not all(isinstance(value, (int, float)) and
-                        not isinstance(value, bool) for value in positions)):
-            raise ValueError("positions_rad must contain seven numbers")
-        positions = [float(value) for value in positions]
-        if not all(math.isfinite(value) for value in positions):
-            raise ValueError("positions_rad values must be finite")
-        for index, (value, limits) in enumerate(
-                zip(positions, JOINT_LIMITS_RAD), start=1):
-            lower, upper = limits
-            if not lower <= value <= upper:
-                raise ValueError(
-                    f"joint {index} request {value} rad is outside "
-                    f"{lower}...{upper} rad"
-                )
         if (isinstance(duration_value, bool) or
                 not isinstance(duration_value, (int, float))):
             raise ValueError("duration_s must be a number")
@@ -1300,6 +1316,8 @@ class GatewayServer:
 
     async def _enter_position_mode(self, arm: ArmConfig,
                                    arm_name: str) -> dict[str, Any]:
+        # Fail before the first torque/mode change when feedback is invalid.
+        await self._fresh_state(arm_name, require_new=True)
         active_response, active_modes = await self._set_and_verify_mode(
             arm, MODE_ACTIVE
         )
@@ -1401,11 +1419,16 @@ class GatewayServer:
     def _state_is_valid_and_fresh(state: ArmState) -> bool:
         if state.monotonic_ns <= 0 or state.sequence <= 0:
             return False
-        if time.monotonic_ns() - state.monotonic_ns > int(
-                MAX_TELEMETRY_AGE_S * 1_000_000_000):
+        age_ns = time.monotonic_ns() - state.monotonic_ns
+        if not 0 <= age_ns <= int(MAX_TELEMETRY_AGE_S * 1_000_000_000):
             return False
-        vectors = (state.positions, state.velocities,
-                   state.currents, state.statuses)
+        try:
+            validate_positions(state.positions)
+        except ValueError:
+            return False
+        vectors = (state.currents, state.statuses)
+        if state.velocities_available:
+            vectors += (state.velocities,)
         return all(
             len(values) == JOINT_COUNT and
             all(isinstance(value, (int, float)) and

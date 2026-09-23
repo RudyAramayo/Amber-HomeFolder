@@ -68,7 +68,8 @@ drain and the disconnect hold sweeps finish.
 
 `position_mode` is deliberately a composite operation:
 
-1. Send vendor command 10 for active mode (1).
+1. Require a new, bounded, finite position sample before any mode change, then
+   send vendor command 10 for active mode (1).
 2. Poll vendor command 110 until all seven joints report mode 1.
 3. Capture a new, finite LCM telemetry sample no older than 250 ms.
 4. Send vendor command 10 for position mode (2).
@@ -99,6 +100,40 @@ positions, a duration from 0.65 through 10 seconds, and these inclusive limits:
 | 2 | -2.3213 | 2.3213 |
 | 3–6 | -2.2863 | 2.2863 |
 | 7 | -3.05 | 3.05 |
+
+The same bounds apply to measured feedback used by **every** hold path,
+including position-mode entry, priority holds, and disconnect/lease backstops.
+The UDP transport also validates every outgoing joint vector before opening a
+socket. Invalid feedback blocks activation and movement; `deactivate` and
+`mode_query` remain available. These checks do not establish physical clearance
+or per-servo freshness: the vendor core can continue publishing cached data.
+
+## Telemetry units and availability
+
+The installed vendor cores publish LCM `jointPosition` in **degrees**, while
+UDP position commands and command-1 status replies use **radians**. The gateway
+converts LCM positions with `radians()` exactly once before exporting
+`positions_rad` or capturing a hold. No side, direction, mounting-angle, or
+encoder-zero correction is included in this unit conversion.
+
+Evidence from September 22, 2026: both deployed core binaries match the
+checked-in L-10 core SHA-256
+`554e7088b94b98f03f152f394c5e5b1d1ecfd16dacd470889e65dc83c36d2100`.
+`RosInterface::Publish()` copies `directControl::jointPositionNow` unchanged
+into LCM; the command-1 handler divides that same array by `57.2958` before
+returning floats. The live raw J2 sample `-119.1484375` therefore represents
+about `-2.07953` rad, not `-119.1484375` rad. The all-zero sample after the power
+cycle cannot independently confirm a conversion factor.
+
+The same core forwards an undocumented raw CAN velocity field. Its physical
+scale and validity are unverified, so this LCM adapter reports
+`"velocities_available":false` and `"velocities_rad_s":null` instead of
+inventing zero velocities. Updated Cerebro retains position/current/status
+diagnostics but leaves velocity cells empty and closes reference/settling gates
+that require seven verified velocities. Older clients may discard these
+telemetry samples and must be rebuilt before using diagnostics. A future
+verified velocity source may supply seven finite rad/s values with availability
+true; clients retain compatibility with legacy finite velocity arrays.
 
 ## Leased trajectories and the backstop hold
 

@@ -6,8 +6,11 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import json
+import math
+import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import rob_amber_gateway as gateway
@@ -99,6 +102,7 @@ class FakeStatus:
                 statuses=list(state.statuses),
                 monotonic_ns=state.monotonic_ns,
                 sequence=state.sequence,
+                velocities_available=state.velocities_available,
             )
             for name, state in self.states.items()
         }
@@ -558,6 +562,51 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.transport.calls[-1][3], self.status.states["left"].positions
         )
         self.assertEqual(self.transport.calls[-1][4], gateway.HOLD_DURATION_S)
+
+    async def test_bad_feedback_never_becomes_a_hold_or_mode_change(self):
+        # Reproduce the observed degree-valued sample being treated as radians.
+        self.status.states["left"].positions[1] = -119.1484375
+        self.transport.modes["left"] = [gateway.MODE_POSITION] * 7
+        reader, writer = await self.authenticate()
+        with mock.patch.object(gateway, "FRESH_TELEMETRY_TIMEOUT_S", 0.06):
+            for command_id, operation in enumerate(
+                    ("position_mode", "hold_current", "priority_hold",
+                     "activate", "trajectory", "leased_trajectory"), 1):
+                response = await self.command(reader, writer, {
+                    "type": operation, "command_id": command_id, "arm": "left",
+                    "positions_rad": [0.0] * 7, "duration_s": 1.0,
+                    "lease_ms": 1000,
+                })
+                if operation == "priority_hold":
+                    self.assertFalse(response["hold_confirmed"])
+                else:
+                    self.assertFalse(response["accepted"])
+        self.assertFalse(any(call[0] in {"set_mode", "move_joints"}
+                             for call in self.transport.calls))
+        # Deactivation must not depend on valid position/velocity feedback.
+        stopped = await self.command(reader, writer, {
+            "type": "deactivate", "command_id": 7, "arm": "left",
+        })
+        self.assertTrue(stopped["accepted"])
+
+    async def test_unverified_velocity_is_unavailable_not_zero(self):
+        state = self.status.states["left"]
+        state.velocities = []
+        state.velocities_available = False
+        reader, writer = await self.authenticate()
+        sample = await self.read_until(reader, "telemetry")
+        self.assertEqual(sample["arm"], "left")
+        self.assertIsNone(sample["velocities_rad_s"])
+        self.assertFalse(sample["velocities_available"])
+        self.assertEqual(sample["positions_rad"], state.positions)
+        # A manual measured-position hold does not certify a velocity or
+        # settled state, and still uses only bounded, fresh measured positions.
+        self.transport.modes["left"] = [gateway.MODE_POSITION] * 7
+        held = await self.command(reader, writer, {
+            "type": "hold_current", "command_id": 1, "arm": "left",
+        })
+        self.assertTrue(held["accepted"])
+        self.assertEqual(held["captured_positions_rad"], state.positions)
 
     async def test_mode_query_hold_trajectory_and_deactivate(self):
         self.transport.modes["right"] = [gateway.MODE_POSITION] * 7
@@ -1338,6 +1387,42 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command.action, gateway.GRIPPER_ACTION_HOLD)
         self.assertEqual(command.intensity, 20)
         self.assertFalse(command.version)
+
+
+class TelemetryBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lcm_degrees_are_normalized_once_and_velocity_is_not_invented(self):
+        degrees = [0.0, -119.1484375, 0.0, 38.203125, 0.0, -1.609375, 0.0]
+        message = SimpleNamespace(
+            jointPosition=degrees, jointVelocity=[4.243991583e-314] * 7,
+            jointCurrent=[0.2] * 7, jointStatus=[2.0] * 7,
+        )
+        # Exercise the actual LCM callback and snapshot without loading LCM.
+        bridge = gateway.LCMStatusBridge.__new__(gateway.LCMStatusBridge)
+        bridge._arm_status_type = SimpleNamespace(decode=lambda data: message)
+        bridge._states = {"left": gateway.ArmState()}
+        bridge._lock = threading.Lock()
+        bridge._handler("left")("Left_ArmStatus", b"fixture")
+        state = bridge.snapshot()["left"]
+        for raw, normalized in zip(degrees, state.positions):
+            self.assertAlmostEqual(normalized, raw * math.pi / 180.0)
+            # Installed vendor UDP status uses the rounded factor 57.2958.
+            self.assertAlmostEqual(normalized, raw / 57.2958, delta=1e-6)
+        self.assertFalse(state.velocities_available)
+        self.assertEqual(state.velocities, [])
+        self.assertEqual(state.currents, message.jointCurrent)
+        self.assertEqual(state.statuses, message.jointStatus)
+        self.assertTrue(gateway.GatewayServer._state_is_valid_and_fresh(state))
+
+    async def test_udp_boundary_rejects_bad_targets_before_opening_socket(self):
+        transport = gateway.AmberUDPTransport("unused")
+        arm = gateway.ArmConfig("left", 26001, "Left_ArmStatus")
+        invalid_targets = ([0.0] * 6, [True] * 7, [float("nan")] * 7,
+                           [0.0, -119.1484375, 0.0, 0.0, 0.0, 0.0, 0.0])
+        with mock.patch.object(gateway.socket, "socket") as open_socket:
+            for target in invalid_targets:
+                with self.subTest(target=target), self.assertRaises(ValueError):
+                    transport._move_joints_blocking(arm, 1, target, 0.65)
+            open_socket.assert_not_called()
 
 
 if __name__ == "__main__":
