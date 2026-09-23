@@ -10,7 +10,16 @@ After the server sends `challenge`, the client sends:
 {"type":"hello","protocol":"rob-amber-gateway/1","token":"..."}
 ```
 
-The server replies with `ready`. Only one authenticated controller session is
+The server replies with `ready`, including `supported_commands`, a list of the
+command types implemented by this gateway. Clients must require explicit
+advertisement of `gripper_state`, `gripper_calibrate`, and `gripper_control`
+before sending optional gripper requests. Older gateways omit this list;
+their arm telemetry and original arm-mode commands remain usable, with gripper
+controls unavailable until the gateway is updated. Unsupported requests return
+`command_error` with `command_type` and `error`; this is not an acknowledgement
+of hardware execution.
+
+Only one authenticated controller session is
 allowed at a time; a second valid-token connection receives an error and is
 closed. The owner receives telemetry and is the only session that can query
 modes or issue commands. Ownership is released when its TCP connection closes.

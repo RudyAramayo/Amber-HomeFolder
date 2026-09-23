@@ -28,6 +28,12 @@ from pathlib import Path
 from typing import Any
 
 PROTOCOL = "rob-amber-gateway/1"
+SUPPORTED_COMMANDS = frozenset({
+    "mode_query", "activate", "position_mode", "hold_current",
+    "deactivate", "trajectory", "leased_trajectory",
+    "renew_lease", "priority_hold",
+    "gripper_state", "gripper_calibrate", "gripper_control",
+})
 JOINT_COUNT = 7
 MAX_LINE_BYTES = 16_384
 MAX_PENDING_COMMANDS_PER_ARM = 32
@@ -415,6 +421,7 @@ class ClientSession:
             await self.send({"type": "ready", "protocol": PROTOCOL,
                              "heartbeat_timeout_s": HEARTBEAT_TIMEOUT_S,
                              "telemetry_hz": round(1 / TELEMETRY_PERIOD_S),
+                             "supported_commands": sorted(SUPPORTED_COMMANDS),
                              "exclusive_controller_session": True})
             self._start_command_workers()
             self.telemetry_task = asyncio.create_task(self._telemetry_loop())
@@ -463,14 +470,9 @@ class ClientSession:
             self.heartbeat_expired = False
             await self.send({"type": "heartbeat_ack", "monotonic_ns": time.monotonic_ns()})
             return
-        supported = {
-            "mode_query", "activate", "position_mode", "hold_current",
-            "deactivate", "trajectory", "leased_trajectory",
-            "renew_lease", "priority_hold",
-            "gripper_state", "gripper_calibrate", "gripper_control",
-        }
-        if message_type not in supported:
+        if message_type not in SUPPORTED_COMMANDS:
             await self.send({"type": "command_error", "accepted": False,
+                             "command_type": message_type,
                              "error": "unsupported message type"})
             return
         started = time.monotonic_ns()

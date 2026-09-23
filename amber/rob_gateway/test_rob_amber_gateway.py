@@ -170,6 +170,31 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
         await self.write_message(writer, request)
         return await self.read_until(reader, f"{request['type']}_ack")
 
+    async def test_ready_advertises_optional_commands_without_hardware_io(self):
+        reader, writer = await self.connect()
+        ready = await self.read_until(reader, "ready")
+        self.assertTrue(ready["exclusive_controller_session"])
+        self.assertTrue({
+            "gripper_state", "gripper_calibrate", "gripper_control",
+        }.issubset(ready["supported_commands"]))
+        self.assertEqual(self.transport.calls, [])
+        state = await self.command(reader, writer, {
+            "type": "gripper_state", "command_id": 1, "arm": "left",
+        })
+        self.assertTrue(state["accepted"])
+        self.assertFalse(state["calibration_verified"])
+        self.assertEqual(self.transport.calls, [])
+
+    async def test_unsupported_command_reports_type_without_hardware_io(self):
+        reader, writer = await self.connect()
+        await self.read_until(reader, "ready")
+        await self.write_message(writer, {"type": "future_command"})
+        error = await self.read_until(reader, "command_error")
+        self.assertFalse(error["accepted"])
+        self.assertEqual(error["command_type"], "future_command")
+        self.assertEqual(error["error"], "unsupported message type")
+        self.assertEqual(self.transport.calls, [])
+
     @staticmethod
     async def write_message(writer: asyncio.StreamWriter,
                             message: dict) -> None:
