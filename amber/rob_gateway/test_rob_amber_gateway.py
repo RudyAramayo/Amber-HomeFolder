@@ -989,7 +989,7 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_device_grip_keeps_calibration_unknown(self):
         self.status.states["left"].statuses = [gateway.MODE_POSITION] * 7
         reader, writer = await self.authenticate()
-        for command_id, action, force in [(1, "hold", 2), (2, "release", 10)]:
+        for command_id, action, force in [(1, "hold", 1), (2, "hold", 2), (3, "release", 10)]:
             result = await self.command(reader, writer, {
                 "type": "gripper_control_existing", "command_id": command_id,
                 "arm": "left", "action": action, "force": force,
@@ -999,7 +999,7 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result["calibration_verified"])
             self.assertFalse(result["completion_verified"])
         self.assertEqual([call[0] for call in self.transport.calls],
-                         ["control_gripper", "control_gripper"])
+                         ["control_gripper", "control_gripper", "control_gripper"])
 
     async def test_existing_device_grip_rejects_force_modes_and_stale_feedback(self):
         self.status.states["left"].statuses = [gateway.MODE_POSITION] * 7

@@ -1,5 +1,13 @@
 # ROB Amber gateway protocol
 
+The explicit `gripper_control_existing` command preserves unknown calibration
+and accepts Hold at vendor intensity 1 or 2, or Release at 10. October 30 can
+recycling uses the minimum intensity 1 following the operator's crushed-can
+report. These are command units, not measured jaw pressure. Current position
+hold, fresh joint/gripper feedback, stationary samples, exclusive ownership and
+absence of a trajectory lease remain required. No automatic force escalation,
+full-travel calibration or verified-possession claim is added.
+
 The gateway listens on an SSH-forwarded TCP connection and exchanges one
 compact JSON object per line. It must remain bound to `127.0.0.1`; the bearer
 token authenticates the connection but does not encrypt it.

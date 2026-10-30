@@ -1354,8 +1354,8 @@ class GatewayServer:
             # Explicit local intervention can try the device's current state
             # without a full-travel calibration beside an object. Never turn
             # this attempt into calibration acceptance or verified possession.
-            if force != {"hold": 2, "release": 10}[action_name]:
-                raise ValueError("existing-device attempt requires hold 2 or release 10")
+            if force not in ({1, 2} if action_name == "hold" else {10}):
+                raise ValueError("existing-device attempt requires hold 1 or 2, or release 10")
             state = self.status.snapshot().get(arm_name)
             if state is None or state.statuses != [MODE_POSITION] * JOINT_COUNT:
                 raise RuntimeError("existing-device attempt requires position hold")
