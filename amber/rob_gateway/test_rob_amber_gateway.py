@@ -564,14 +564,38 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
         )
         call_names = [call[0] for call in self.transport.calls]
         self.assertEqual(call_names, [
-            "set_mode", "get_modes", "set_mode", "get_modes", "move_joints",
+            "get_modes", "set_mode", "get_modes", "set_mode", "get_modes", "move_joints",
         ])
-        self.assertEqual(self.transport.calls[0][3], gateway.MODE_ACTIVE)
-        self.assertEqual(self.transport.calls[2][3], gateway.MODE_POSITION)
+        self.assertEqual(self.transport.calls[1][3], gateway.MODE_ACTIVE)
+        self.assertEqual(self.transport.calls[3][3], gateway.MODE_POSITION)
         self.assertEqual(
             self.transport.calls[-1][3], self.status.states["left"].positions
         )
         self.assertEqual(self.transport.calls[-1][4], gateway.HOLD_DURATION_S)
+
+    async def test_repeated_position_mode_never_cycles_or_retargets_raised_arm(self):
+        self.transport.modes["left"] = [gateway.MODE_POSITION] * 7
+        self.status.states["left"].statuses = [float(gateway.MODE_POSITION)] * 7
+        reader, writer = await self.authenticate()
+        for command_id in (1, 2):
+            response = await self.command(reader, writer, {
+                "type": "position_mode", "command_id": command_id, "arm": "left",
+            })
+            self.assertTrue(response["accepted"])
+            self.assertTrue(response["already_in_position_mode"])
+            self.assertFalse(response["motor_output"])
+        self.assertEqual([c[0] for c in self.transport.calls], ["get_modes", "get_modes"])
+
+    async def test_position_mode_disagreement_and_mixed_holds_never_reinitialize(self):
+        reader, writer = await self.authenticate()
+        for command_id, modes in enumerate(([2] * 7, [2, 2, 0, 0, 0, 0, 0]), 1):
+            self.transport.modes["left"] = modes
+            self.status.states["left"].statuses = [0.0] * 7
+            response = await self.command(reader, writer, {
+                "type": "position_mode", "command_id": command_id, "arm": "left",
+            })
+            self.assertFalse(response["accepted"])
+        self.assertTrue(all(c[0] == "get_modes" for c in self.transport.calls))
 
     async def test_bad_feedback_never_becomes_a_hold_or_mode_change(self):
         # Reproduce the observed degree-valued sample being treated as radians.

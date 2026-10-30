@@ -1462,7 +1462,25 @@ class GatewayServer:
     async def _enter_position_mode(self, arm: ArmConfig,
                                    arm_name: str) -> dict[str, Any]:
         # Fail before the first torque/mode change when feedback is invalid.
-        await self._fresh_state(arm_name, require_new=True)
+        captured = await self._fresh_state(arm_name, require_new=True)
+        modes = await self._query_modes(arm)
+        if modes == [MODE_POSITION] * JOINT_COUNT:
+            # Entering ACTIVE again briefly drops a raised arm on this
+            # hardware. An app reconnect or repeated Position click must be
+            # read-only when the arm is already holding. Do not even replace
+            # its existing trajectory with a measured hold.
+            if captured.statuses != [float(MODE_POSITION)] * JOINT_COUNT:
+                raise RuntimeError(
+                    "position mode query disagrees with motor feedback; "
+                    "leaving the arm untouched, not reinitializing it"
+                )
+            return {"already_in_position_mode": True,
+                    "motor_output": False, **self._mode_result(modes)}
+        if MODE_POSITION in modes:
+            raise RuntimeError(
+                "mixed joint modes include an existing position hold; "
+                "support the arm before explicit recovery"
+            )
         active_response, active_modes = await self._set_and_verify_mode(
             arm, MODE_ACTIVE
         )

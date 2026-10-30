@@ -44,3 +44,13 @@ See [`docs/amber-master-persistence.md`](docs/amber-master-persistence.md) for
 the recovery boundary, installed dependencies, service ordering, and secret
 handling. See [`docs/amber-stack-recovery.md`](docs/amber-stack-recovery.md)
 for the privileged-helper contract and physical safety requirements.
+
+## Position-mode reconnect behavior
+
+Re-entering ACTIVE before POSITION briefly releases a raised arm on this
+hardware. Query mode after a controller-app reconnect. The gateway treats a
+repeated position-mode request as read-only when all seven queried modes and
+fresh motor statuses already confirm position hold. It sends neither a mode
+change nor a replacement target. Conflicting feedback or mixed modes that
+include position hold reject without reinitializing the arm. A real transition
+from another mode still requires the arm to be hanging or physically supported.
