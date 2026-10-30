@@ -33,7 +33,7 @@ SUPPORTED_COMMANDS = frozenset({
     "mode_query", "activate", "position_mode", "hold_current",
     "deactivate", "trajectory", "leased_trajectory",
     "renew_lease", "priority_hold",
-    "gripper_state", "gripper_calibrate", "gripper_control",
+    "gripper_state", "gripper_calibrate", "gripper_control", "gripper_control_existing",
 })
 JOINT_COUNT = 7
 MAX_LINE_BYTES = 16_384
@@ -1014,10 +1014,11 @@ class GatewayServer:
                     arm, arm_name, session, controller_generation,
                     motion_authority_generation,
                 )
-            if operation == "gripper_control":
+            if operation in {"gripper_control", "gripper_control_existing"}:
                 return await self._control_gripper(
                     arm, arm_name, message, session,
                     controller_generation, motion_authority_generation,
+                    existing_device_state=operation == "gripper_control_existing",
                 )
             if operation == "activate":
                 await self._fresh_state(arm_name, require_new=True)
@@ -1325,9 +1326,10 @@ class GatewayServer:
     async def _control_gripper(
             self, arm: ArmConfig, arm_name: str, message: dict[str, Any],
             session: ClientSession, controller_generation: int,
-            motion_authority_generation: int) -> dict[str, Any]:
+            motion_authority_generation: int,
+            existing_device_state: bool = False) -> dict[str, Any]:
         self._require_fresh_gripper_telemetry(arm_name)
-        if (self._gripper_calibration[arm_name] !=
+        if (not existing_device_state and self._gripper_calibration[arm_name] !=
                 GRIPPER_CALIBRATION_ACCEPTED_UNVERIFIED):
             raise RuntimeError(
                 f"{arm_name} gripper requires calibration acceptance "
@@ -1348,6 +1350,30 @@ class GatewayServer:
                 f"force is outside {MIN_GRIPPER_FORCE}..."
                 f"{MAX_GRIPPER_FORCE} vendor intensity units"
             )
+        if existing_device_state:
+            # Explicit local intervention can try the device's current state
+            # without a full-travel calibration beside an object. Never turn
+            # this attempt into calibration acceptance or verified possession.
+            if force != {"hold": 2, "release": 10}[action_name]:
+                raise ValueError("existing-device attempt requires hold 2 or release 10")
+            state = self.status.snapshot().get(arm_name)
+            if state is None or state.statuses != [MODE_POSITION] * JOINT_COUNT:
+                raise RuntimeError("existing-device attempt requires position hold")
+            if arm_name in self._leases:
+                raise RuntimeError("existing-device attempt cannot overlap an arm lease")
+            hold = self._active_holds.get(arm_name)
+            if hold is not None and not hold.task.done():
+                raise RuntimeError("existing-device attempt waits for the arm hold")
+            await asyncio.sleep(0.10)
+            settled = await self._fresh_state(arm_name, require_new=True)
+            if (settled.statuses != [MODE_POSITION] * JOINT_COUNT or
+                    any(abs(a - b) > 0.002 for a, b in
+                        zip(state.positions, settled.positions))):
+                raise RuntimeError("existing-device attempt requires a stationary arm")
+            self._require_motion_authority(
+                session, controller_generation, motion_authority_generation
+            )
+            self._require_fresh_gripper_telemetry(arm_name)
         response = await self.transport.control_gripper(
             arm, self._next_udp_counter(), actions[action_name], force
         )

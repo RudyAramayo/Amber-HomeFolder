@@ -986,6 +986,61 @@ class GatewayProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(call[0] == "control_gripper"
                              for call in self.transport.calls))
 
+    async def test_existing_device_grip_keeps_calibration_unknown(self):
+        self.status.states["left"].statuses = [gateway.MODE_POSITION] * 7
+        reader, writer = await self.authenticate()
+        for command_id, action, force in [(1, "hold", 2), (2, "release", 10)]:
+            result = await self.command(reader, writer, {
+                "type": "gripper_control_existing", "command_id": command_id,
+                "arm": "left", "action": action, "force": force,
+            })
+            self.assertTrue(result["accepted"], result)
+            self.assertEqual(result["calibration_state"], gateway.GRIPPER_CALIBRATION_REQUIRED)
+            self.assertFalse(result["calibration_verified"])
+            self.assertFalse(result["completion_verified"])
+        self.assertEqual([call[0] for call in self.transport.calls],
+                         ["control_gripper", "control_gripper"])
+
+    async def test_existing_device_grip_rejects_force_modes_and_stale_feedback(self):
+        self.status.states["left"].statuses = [gateway.MODE_POSITION] * 7
+        reader, writer = await self.authenticate()
+        for command_id, action, force in [(1, "hold", 3), (2, "release", 2), (3, "hold", True)]:
+            result = await self.command(reader, writer, {
+                "type": "gripper_control_existing", "command_id": command_id,
+                "arm": "left", "action": action, "force": force,
+            })
+            self.assertFalse(result["accepted"])
+        self.status.states["left"].statuses[0] = gateway.MODE_INACTIVE
+        result = await self.command(reader, writer, {
+            "type": "gripper_control_existing", "command_id": 4,
+            "arm": "left", "action": "hold", "force": 2,
+        })
+        self.assertFalse(result["accepted"])
+        self.status.states["left"].statuses = [gateway.MODE_POSITION] * 7
+        self.status.advancing = False
+        self.status.states["left"].feedback_monotonic_ns = [0] * 8
+        result = await self.command(reader, writer, {
+            "type": "gripper_control_existing", "command_id": 5,
+            "arm": "left", "action": "hold", "force": 2,
+        })
+        self.assertFalse(result["accepted"])
+        self.assertEqual(self.transport.calls, [])
+
+    async def test_existing_device_grip_rejects_active_motion_lease(self):
+        self.status.states["left"].statuses = [gateway.MODE_POSITION] * 7
+        reader, writer = await self.authenticate()
+        self.gateway._leases["left"] = None
+        try:
+            result = await self.command(reader, writer, {
+                "type": "gripper_control_existing", "command_id": 1,
+                "arm": "left", "action": "hold", "force": 2,
+            })
+            self.assertFalse(result["accepted"])
+            self.assertIn("arm lease", result["error"])
+            self.assertEqual(self.transport.calls, [])
+        finally:
+            self.gateway._leases.pop("left", None)
+
     async def test_gripper_calibrate_then_accepts_bounded_actions(self):
         reader, writer = await self.authenticate()
         calibrated = await self.command(reader, writer, {
