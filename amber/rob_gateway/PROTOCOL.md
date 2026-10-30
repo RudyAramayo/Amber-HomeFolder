@@ -1,9 +1,11 @@
 # ROB Amber gateway protocol
 
 The explicit `gripper_control_existing` command preserves unknown calibration
-and accepts Hold at vendor intensity 1 or 2, or Release at 10. October 30 can
-recycling uses the minimum intensity 1 following the operator's crushed-can
-report. These are command units, not measured jaw pressure. Current position
+and accepts Hold at vendor intensity 1 or 2, or Release at 10. The operator
+restored the previous can-grip intensity 2 on October 30, identifying startup
+calibration as a possible cause of crushing; automatic startup jaw calibration
+remains disabled in Cerebro's passive startup mode. Intensity 1 remains available
+when explicitly selected. These are command units, not measured jaw pressure. Current position
 hold, fresh joint/gripper feedback, stationary samples, exclusive ownership and
 absence of a trajectory lease remain required. No automatic force escalation,
 full-travel calibration or verified-possession claim is added.
