@@ -44,6 +44,9 @@ class FakeHost:
         self.gateway_fails_on_settle = False
         self.startup_trusted = True
         self.dependencies_ready = True
+        self.continuous_owner_blocked = False
+        self.block_on_second_check = False
+        self.ownership_checks = 0
         self.slcand_uid = 0
         self.core_uid = 1000
         self.fail_actions: set[tuple[str, str]] = set()
@@ -186,6 +189,11 @@ class FakeHost:
                 "dependency_missing", "Dependency fixture failed."
             )
 
+    def validate_no_continuous_owner(self) -> None:
+        self.ownership_checks += 1
+        if self.continuous_owner_blocked or (self.block_on_second_check and self.ownership_checks == 2):
+            raise recovery.RecoveryFailure('continuous_controller_owns_stack', 'Ownership fixture blocked.')
+
     def amber_uid(self) -> int:
         return 1000
 
@@ -221,6 +229,45 @@ class FakeHost:
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_continuous_owner_inhibit_prevents_any_service_change(self) -> None:
+        host = FakeHost()
+        host.continuous_owner_blocked = True
+        success, records = self.run_recovery(host)
+        self.assertFalse(success)
+        self.assertEqual(host.actions, [])
+        self.assertFalse(records[-1]['recovery_started'])
+        self.assertEqual(records[-1]['code'], 'continuous_controller_owns_stack')
+
+    def test_ownership_rechecked_before_legacy_restart(self) -> None:
+        host = FakeHost()
+        host.block_on_second_check = True
+        success, records = self.run_recovery(host)
+        self.assertFalse(success)
+        self.assertFalse(any(action == 'start' for action, _ in host.actions))
+        self.assertEqual(records[-1]['code'], 'continuous_controller_owns_stack')
+
+    def test_real_inhibit_missing_present_symlink_and_unreadable(self) -> None:
+        backend = recovery.RealHostBackend()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'inhibit'
+            with mock.patch.object(recovery, 'CONTINUOUS_OWNER_BLOCK_PATH', str(path)):
+                backend.validate_no_continuous_owner()
+                for kind in ('file', 'directory', 'dangling_symlink'):
+                    if kind == 'file':
+                        path.write_text('')
+                    elif kind == 'directory':
+                        path.mkdir()
+                    else:
+                        path.symlink_to(Path(directory) / 'missing')
+                    with self.assertRaises(recovery.RecoveryFailure) as raised:
+                        backend.validate_no_continuous_owner()
+                    self.assertEqual(raised.exception.code, 'continuous_controller_owns_stack')
+                    path.rmdir() if kind == 'directory' else path.unlink()
+                with mock.patch.object(recovery.os, 'lstat', side_effect=PermissionError):
+                    with self.assertRaises(recovery.RecoveryFailure) as raised:
+                        backend.validate_no_continuous_owner()
+                    self.assertEqual(raised.exception.code, 'controller_ownership_unknown')
+
     def run_recovery(self, host: FakeHost) -> tuple[bool, list[dict]]:
         output = io.StringIO()
         emitter = recovery.JSONLineEmitter(output, "00000000-0000-0000-0000-000000000001")

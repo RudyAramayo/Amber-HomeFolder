@@ -33,6 +33,7 @@ from typing import Callable, FrozenSet, Iterable, Protocol, Sequence, TextIO
 PROTOCOL = "rob-amber-recovery/1"
 OPERATION = "restart_can_core_gateway"
 LOCK_PATH = "/run/rob-amber-recovery.lock"
+CONTINUOUS_OWNER_BLOCK_PATH = "/etc/rob-amber-gateway/continuous-controller.block"
 GATEWAY_UNIT = "rob-amber-gateway.service"
 CORE_UNIT = "rc-local.service"
 GATEWAY_PORT = 7443
@@ -142,6 +143,7 @@ class HostBackend(Protocol):
     def configured_mapping(self) -> dict[str, str]: ...
     def validate_startup_trust(self) -> None: ...
     def validate_dependencies(self) -> None: ...
+    def validate_no_continuous_owner(self) -> None: ...
     def amber_uid(self) -> int: ...
     def usb_serials(self) -> dict[str, str]: ...
     def can_statistics(self, interface: str) -> CANStatistics: ...
@@ -207,6 +209,24 @@ class JSONLineEmitter:
 
 class RealHostBackend:
     """Read host state and execute only the fixed systemd operations."""
+
+    def validate_no_continuous_owner(self) -> None:
+        # Presence inhibits recovery regardless of contents, file type or age.
+        # A dangling symlink is also an inhibit. Never remove a "stale" marker:
+        # the replacement process may have died while drives retain a target.
+        try:
+            os.lstat(CONTINUOUS_OWNER_BLOCK_PATH)
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise RecoveryFailure(
+                "controller_ownership_unknown",
+                "Cannot inspect the continuous-controller inhibit; recovery is blocked.",
+            ) from None
+        raise RecoveryFailure(
+            "continuous_controller_owns_stack",
+            "Continuous-controller inhibit is present; legacy recovery is blocked.",
+        )
 
     SYSTEMCTL = "/usr/bin/systemctl"
     IP = "/usr/sbin/ip"
@@ -807,6 +827,7 @@ class RecoveryController:
         try:
             # Reject an incomplete or unsafe installation without interrupting
             # an otherwise healthy running controller stack.
+            self.backend.validate_no_continuous_owner()
             self.backend.validate_startup_trust()
             self.backend.validate_dependencies()
             self._verify_expected_usb_adapters()
@@ -844,6 +865,7 @@ class RecoveryController:
 
             # Recheck hot-pluggable adapters and protected startup inputs after
             # the clean stop, immediately before the one allowed start.
+            self.backend.validate_no_continuous_owner()
             self.backend.validate_startup_trust()
             self.backend.validate_dependencies()
             self._verify_expected_usb_adapters()

@@ -21,6 +21,7 @@ MAPPING_PATH = "/etc/rob-amber-gateway/can-interfaces.json"
 SLCAND_PATH = "/usr/bin/slcand"
 IP_PATH = "/usr/sbin/ip"
 EXPECTED_INTERFACES = frozenset(("can10", "can11"))
+CONTINUOUS_OWNER_BLOCK_PATH = "/etc/rob-amber-gateway/continuous-controller.block"
 
 
 def fail(message: str) -> NoReturn:
@@ -54,6 +55,16 @@ def load_mapping() -> dict[str, str]:
     if len(set(payload.values())) != 2:
         fail("adapter serial values must be distinct")
     return dict(payload)
+
+
+def require_legacy_ownership() -> None:
+    try:
+        os.lstat(CONTINUOUS_OWNER_BLOCK_PATH)
+    except FileNotFoundError:
+        return
+    except OSError:
+        fail("cannot inspect continuous-controller inhibit; refusing CAN setup")
+    fail("continuous-controller inhibit is present; refusing legacy CAN setup")
 
 
 def serial_for_device(device: str) -> str | None:
@@ -109,6 +120,7 @@ def main() -> int:
     if os.geteuid() != 0:
         fail("this initializer must run as root from rc.local")
 
+    require_legacy_ownership()
     mapping = load_mapping()
     serial_to_devices: dict[str, list[str]] = {}
     for device in sorted(glob.glob("/dev/ttyACM*")):
@@ -134,6 +146,7 @@ def main() -> int:
         fail("can10 and can11 did not resolve to distinct USB devices")
 
     for interface in sorted(resolved):
+        require_legacy_ownership()
         device = resolved[interface]
         run(
             [SLCAND_PATH, "-o", "-c", "-s8", device, interface],

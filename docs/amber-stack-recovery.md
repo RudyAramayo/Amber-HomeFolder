@@ -1,5 +1,37 @@
 # Amber stack recovery helper
 
+## Continuous-controller handoff preparation (2026-11-03)
+
+Source now checks the persistent inhibit
+`/etc/rob-amber-gateway/continuous-controller.block` before recovery makes any
+service change and again before it starts the cores. The CAN initializer checks
+it before reading the mapping and before each adapter setup. `rc.local` checks
+before network setup and again before launching the vendor cores. Any existing
+object, including an empty file, directory or dangling symlink, inhibits these
+paths; Python inspection errors also refuse continuation. No content, timestamp,
+PID or expiry can silently clear it.
+
+These changes are staged development, **not installed privileged programs**.
+Rudy authorized inactive deployment, then went to bed; no service restart, CAN
+cutover, inhibit creation, mode command or motor test is authorized overnight.
+The robot still runs the previous root-owned helper/startup code. A file copied
+under `/home/amber/rob-controller-staging` does not protect those active paths.
+
+A future root-owned cutover must serialize with the existing
+`/run/rob-amber-recovery.lock`, install and verify the reviewed guards, persist the
+inhibit before stopping the legacy services, mask legacy launch paths, and keep
+physical CAN in a pinned namespace with serial access restricted. The inhibit
+does not replace those measures or exclude arbitrary root commands. Holding the
+shared lock prevents recovery and a conforming cutover racing each other; the
+marker persists after a process crash or reboot. Do not infer exclusive ownership
+from the marker alone. Never auto-remove it or restart vendor cores after a
+failed cutover; removal requires supported/inactive arms and a reviewed rollback.
+
+Validation: `python3 -B -m unittest test_rob_amber_recovery test_continuous_owner_inhibit`
+from `amber/rob_gateway`; all fixtures are offline. The shell fixture executes
+only the extracted guard before the first network command. Live namespace/serial
+ownership, drive watchdog behavior and hardware recovery remain uncommissioned.
+
 `rob-amber-recover` is the fixed Ubuntu maintenance operation used by
 Cerebro's **Restart CAN/Core Stack…** control. It is not an arm-control protocol.
 It never imports LCM, opens UDP/CAN sockets, or sends a mode, activation,

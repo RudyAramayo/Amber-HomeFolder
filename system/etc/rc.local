@@ -6,6 +6,16 @@
 # code execution.
 set -eu
 
+require_legacy_ownership() {
+  # Persistent fail-closed inhibit; do not clear it after a crash or reboot.
+  if [ -e /etc/rob-amber-gateway/continuous-controller.block ] || \
+     [ -L /etc/rob-amber-gateway/continuous-controller.block ]; then
+    echo "[ AMBER CORE ] Continuous-controller inhibit present; legacy startup blocked" >&2
+    exit 1
+  fi
+}
+require_legacy_ownership
+
 /usr/sbin/ip link set dev lo multicast on
 /usr/sbin/ip route replace 224.0.0.0/4 dev lo
 /usr/sbin/ip route replace 239.255.76.67/32 dev enp2s0
@@ -17,6 +27,7 @@ do
   echo "[ AMBER CORE ] Waiting Network [$i/15]"
 done
 
+require_legacy_ownership
 /usr/sbin/runuser -u amber -- \
   /usr/bin/env 'LCM_DEFAULT_URL=udpm://239.255.76.67:7667?ttl=10' \
   /usr/bin/nohup /bin/sh -c \
